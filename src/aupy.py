@@ -119,14 +119,13 @@ class AupeIO:
         for png_file in png_files:
             if 'HRC' in png_file.name:
                 hrc_files.append(png_file)
-            elif 'LWAC2_' in png_file.name or 'LWAC3_' in png_file.name or 'LWAC1_' in png_file.name:
+            elif 'LWAC2_' in png_file.name or 'LWAC3_' in png_file.name or 'LWAC4_' in png_file.name:
                 lwac_rgb_files.append(png_file)
-            # elif 'RWAC1_' in png_file.name or 'RWAC3_' in png_file.name or 'RWAC4_' in png_file.name:
-            elif 'RWAC2_' in png_file.name or 'RWAC3_' in png_file.name or 'RWAC1_' in png_file.name:
+            elif 'RWAC2_' in png_file.name or 'RWAC3_' in png_file.name or 'RWAC4_' in png_file.name:
                 rwac_rgb_files.append(png_file)
             else:
-                wac_ms_files.append(png_file)
-        
+                wac_ms_files.append(png_file)      
+          
         # stash the lists
         self.hrc_files = hrc_files
         self.lwac_rgb_files = lwac_rgb_files 
@@ -178,6 +177,9 @@ class AupeIO:
         for wac_rgb_file in wac_rgb_files:
             file_dict = self.file_dict(wac_rgb_file, 'WAC_RGB')
             file_dicts.append(file_dict)
+        
+        # sort the list of dictionaries by the file name descending
+        file_dicts.sort(key=lambda x: x['filepath'].name, reverse=False)
         
         return file_dicts
     
@@ -247,7 +249,9 @@ class CalibrationTarget:
         self.observed_values = {}  # dict of metrics per patch
 
     def load_data(self):
-        pass
+        filepath = Path('..', 'data', 'colorchecker_srgb_d50.csv')
+        # read the csv file into a pandas dataframe
+        cal_targ_df = pd.read_csv(filepath, index_col=0)
 
     def load_rois(self):
         pass
@@ -567,9 +571,9 @@ class RGB:
     def __init__(self,
                  rgb_path_dict: Tuple[Dict, Dict, Dict],
                  aupe_info: AupeInfo):
-        self.red = Img(rgb_path_dict[0], aupe_info)
+        self.red = Img(rgb_path_dict[2], aupe_info)
         self.green = Img(rgb_path_dict[1], aupe_info)
-        self.blue = Img(rgb_path_dict[2], aupe_info)
+        self.blue = Img(rgb_path_dict[0], aupe_info)
         self.rgb_image = np.stack([self.red.image, self.green.image, self.blue.image], axis=2)
         self.ccm = np.empty((3,3))
         self.balance_vector = {
@@ -639,7 +643,20 @@ class RGB:
         return stretch_img
 
     def load_calibration_target(self):
-        pass
+        """Load in the calibration target data, including ROIs, if these have been saved.
+        """
+
+    def draw_calibration_target(self, cal_targ: CalibrationTarget):
+        """Draw the calibration target on the image
+        """
+        # draw the calibration target on the image
+        # TODO - add a method to save the rois
+        disp_img = self.apply_balance_vector('99p')
+
+        # patches
+
+        # for patch in patches:
+
 
     def extract_ccm(self):
         pass
@@ -656,7 +673,7 @@ class RGB:
             # zoom in on the colorchecker target
             title = 'Select Calibration Target Approx. ROI'
             print('First draw an ROI around the calibration target')
-            ct_roi = cv2.selectROI(title, self.rgb_image)
+            ct_roi = cv2.selectROI(title, cv2.cvtColor(self.rgb_image, cv2.COLOR_RGB2BGR))
             # switch order of roi to (y, x, h, w)
             ct_roi = (ct_roi[1], ct_roi[0], ct_roi[3], ct_roi[2])           
             cv2.destroyWindow(title)             
@@ -664,7 +681,7 @@ class RGB:
             title = 'Select White Patch ROI'
             print('Now draw an ROI around the white patch on the calibration target')
             ct_img = self.rgb_image[ct_roi[0]:ct_roi[0]+ct_roi[2], ct_roi[1]:ct_roi[1]+ct_roi[3]]
-            wp_roi = cv2.selectROI(title, ct_img)
+            wp_roi = cv2.selectROI(title, cv2.cvtColor(ct_img, cv2.COLOR_RGB2BGR))
             # switch order of roi to (y, x, h, w)
             wp_roi = (wp_roi[1], wp_roi[0], wp_roi[3], wp_roi[2])           
             cv2.destroyWindow(title)
@@ -808,9 +825,9 @@ class HRC(RGB):
         # debayer the image
         raw_img = self.red.image
         col_img = cv2.cvtColor(raw_img, cv2.COLOR_BAYER_BG2BGR)
-        self.red.image = col_img[:,:,0]
+        self.red.image = col_img[:,:,2]
         self.green.image = col_img[:,:,1]
-        self.blue.image = col_img[:,:,2]
+        self.blue.image = col_img[:,:,0]
         self.rgb_image = np.stack([self.red.image, self.green.image, self.blue.image], axis=2)
         self.reset_balance_vector('all')
         self.debayered = True
