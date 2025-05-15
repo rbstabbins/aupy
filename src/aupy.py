@@ -6,7 +6,7 @@
 # 9/5/2025
 
 from pathlib import Path
-from typing import Dict, List, Literal, Tuple
+from typing import Dict, List, Literal, Tuple, Union
 import cv2
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -24,186 +24,22 @@ LEVEL_DICT = {
     'ctr': 'calibration target reflectance'
 }
 
+# D50 illuminant (direct sunlight 5000K + skylight) RGB values of white patch
 # WP_RED = 245
 # WP_GREEN = 245
 # WP_BLUE = 243
 
+# C illuminant (shade) RGB values of white patch
 WP_RED = 243
 WP_GREEN = 244
 WP_BLUE = 243
 
 BIT_DEPTH = 8
 
-# TODO put this as an AUPE class, and load this info from csv file
-# be sure to include a date stamp and version number for this AUPE information
-
-# define a class for parsing a directory of AUPE images. Accepts the SOL and scene,
-# and finds the directory, then gives a list of images in the directory, and 
-# sorts the list into HRC, WAC RGB and 
-# WAC MS image sets.
-class AupeIO:
-    def __init__(self, sol: str, scene: str, trial: str=None):
-        self.sol = sol
-        self.scene = scene
-        self.trial = trial
-
-        if trial is not None:
-            self.scene_dir = Path('..', '..', 'data', sol, scene, trial)
-        else:
-            self.scene_dir = Path('..', '..', 'data', sol, scene)
-        # build the processed data directory
-
-        self.hrc_out_dir = None
-        self.wac_rgb_out_dir = None
-        self.wac_ms_out_dir = None
-
-        self.build_scene_dir()
-        
-        self.sort_images()
-
-        png_files = list(self.scene_dir.glob("*.png"))
-        # sort by name
-        png_files.sort()
-
-        self.hrc_files = []
-        self.lwac_rgb_files = []
-        self.rwac_rgb_files = []
-        self.wac_ms_files = []
-        self.sort_images()
-        
-
-    def build_scene_dir(self):
-        """Build the scene directory from the sol and scene
-        """
-        # check if the directory exists
-        if not self.scene_dir.exists():
-            raise FileNotFoundError(f"Directory {self.scene_dir} does not exist")
-        # build the output directory
-        if self.trial is not None:
-            self.out_dir = Path('..', '..', 'processed', self.sol, self.scene, self.trial)
-        else:
-            self.out_dir = Path('..', '..', 'processed', self.sol, self.scene, 'Trial1')
-            self.trial = 'Trial1'
-
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-
-        # create the subdirectories for HRC, WAC RGB and WAC MS outputs
-        hrc_dir = Path(self.out_dir, 'HRC')
-        hrc_dir.mkdir(parents=True, exist_ok=True)
-        wac_rgb_dir = Path(self.out_dir, 'WAC_RGB')
-        wac_rgb_dir.mkdir(parents=True, exist_ok=True)
-        wac_ms_dir = Path(self.out_dir, 'WAC_MS')
-        wac_ms_dir.mkdir(parents=True, exist_ok=True)
-
-        # set the output directories
-        self.hrc_out_dir = hrc_dir
-        self.wac_rgb_out_dir = wac_rgb_dir
-        self.wac_ms_out_dir = wac_ms_dir
-
-    def sort_images(self):
-        """Load the images from the directory and sort them into HRC, WAC RGB and WAC MS
-        """
-        # get all the images in the directory
-        png_files = list(self.scene_dir.glob("*.png"))
-        # sort by name
-        png_files.sort()  
-
-        # if the filename inlcudes the string 'HRC' put in list hrc_imgs
-        hrc_files = []
-        # if the filename includes any of 'WAC_2', 'WAC_3', 'WAC_4' put in list wac_rgb_imgs
-        lwac_rgb_files = []
-        rwac_rgb_files = []
-        # else, put the filename in list wac_ms_imgs
-        wac_ms_files = []
-
-        for png_file in png_files:
-            if 'HRC' in png_file.name:
-                hrc_files.append(png_file)
-            elif 'LWAC2_' in png_file.name or 'LWAC3_' in png_file.name or 'LWAC4_' in png_file.name:
-                lwac_rgb_files.append(png_file)
-            elif 'RWAC2_' in png_file.name or 'RWAC3_' in png_file.name or 'RWAC4_' in png_file.name:
-                rwac_rgb_files.append(png_file)
-            else:
-                wac_ms_files.append(png_file)      
-          
-        # stash the lists
-        self.hrc_files = hrc_files
-        self.lwac_rgb_files = lwac_rgb_files 
-        self.rwac_rgb_files = rwac_rgb_files
-        self.wac_rgb_files = lwac_rgb_files + rwac_rgb_files
-        self.wac_ms_files = wac_ms_files # TODO sort this into LWAC and RWAC
-    
-    def file_dict(self, filepath: Path, img_type: Literal['HRC', 'WAC_RGB', 'WAC_MS']) -> Dict:
-        """For the given filepath, return a dictionary giving:
-        - full file path
-        - file name
-        - sol
-        - scene
-        - trial
-        - output directory
-
-        :param filepath: file path to the image
-        :type filepath: Path
-        :return: File information needed to process the image
-        :rtype: Dict
-        """        
-        file_dict = {}
-        file_dict['filepath'] = filepath
-        file_dict['trial'] = self.trial
-        file_dict['scene'] = self.scene
-        file_dict['sol'] = self.sol
-        if img_type == 'HRC':
-            file_dict['img_type'] = 'HRC'
-            file_dict['out_dir'] = self.hrc_out_dir
-        elif img_type == 'WAC_RGB':
-            file_dict['img_type'] = 'WAC_RGB'
-            file_dict['out_dir'] = self.wac_rgb_out_dir
-        elif img_type == 'WAC_MS':
-            file_dict['img_type'] = 'WAC_MS'
-            file_dict['out_dir'] = self.wac_ms_out_dir
-        
-        return file_dict
-    
-    def wac_rgb_file_dict(self, wac_rgb_files: List) -> List:
-        """For the given list of WAC RGB files, return a list of dictionaries
-        giving the file information for each file.
-
-        :param wac_rgb_files: list of WAC RGB files
-        :type wac_rgb_files: List
-        :return: list of dictionaries with file information
-        :rtype: List
-        """        
-        file_dicts = []
-        for wac_rgb_file in wac_rgb_files:
-            file_dict = self.file_dict(wac_rgb_file, 'WAC_RGB')
-            file_dicts.append(file_dict)
-        
-        # sort the list of dictionaries by the file name descending
-        file_dicts.sort(key=lambda x: x['filepath'].name, reverse=False)
-        
-        return file_dicts
-    
-    def hrc_file_dict(self, hrc_file: Path) -> Dict:
-        """For the given HRC file, return a dictionary
-        giving the file information for the file, duplicated into each
-        of the red, green and blue slots.
-
-        :param hrc_file: HRC file
-        :type hrc_file: Path
-        :return: dictionary with file information
-        :rtype: Dict
-        """        
-        file_dicts = [
-            self.file_dict(hrc_file, 'HRC'),
-            self.file_dict(hrc_file, 'HRC'),
-            self.file_dict(hrc_file, 'HRC')
-        ]
-        return file_dicts
-
 class AupeInfo:
     def __init__(self, filepath: Path):
         """Holds AUPE information not included in the 
-        image metadata, namely mapping filter ids to
+        image metadata, namely mapping filter positions and ids to
         cwl and fwhm. 
         
         Note, these values change between different versions of AUPE 
@@ -218,8 +54,12 @@ class AupeInfo:
         :type filepath: Path
         """
         # read the filepath csv file into the object
-        self.cwls = None
-        self.fwhms = None
+        self.aupe_info_version = None
+        self.aupe_info_date = None
+        self.filter_pos = None
+        self.filter_id = None
+        self.cwl = None
+        self.fwhm = None
         self.load_aupe_info(filepath)
 
         # cam number -> camera does not typically change between AUPE versions.
@@ -235,21 +75,216 @@ class AupeInfo:
         """Load the AUPE information from the csv file
         """
         # read the filepath csv file into the object
-        aupe_info = pd.read_csv(filepath, index_col=0)
-        self.cwls = aupe_info['cwl'].to_dict()
-        self.fwhms = aupe_info['fwhm'].to_dict()
-        # TODO read version number/date/project from info file
+        # expect header lines of version and date
+        header = pd.read_csv(filepath, nrows=2, usecols=[0,1], index_col=0)
+        self.aupe_info_version = header.loc['version'].values[0]
+        self.aupe_info_date = header.loc['date'].values[0]
+        # read the data
+        aupe_info = pd.read_csv(filepath, index_col=0, header=3)
+        self.filter_pos = aupe_info.index.to_list()
+        self.filter_id = aupe_info['filter_id'].to_dict()
+        self.cwl = aupe_info['cwl'].to_dict()
+        self.fwhm = aupe_info['fwhm'].to_dict()
+    
+    def inverse_filter_id(self):
+        """Invert the filter id dictionary to get the filter id from the filter
+        position.
+        """
+        # invert the filter id dictionary
+        inv_filter_id = {v: k for k, v in self.filter_id.items()}
+        return inv_filter_id
+    
+    def inverse_cwl(self):
+        """Invert the cwl dictionary to get the cwl from the filter position.
+        """
+        # invert the cwl dictionary
+        inv_cwl = {v: k for k, v in self.cwl.items()}
+        return inv_cwl
+    
+    def inverse_fwhm(self):
+        """Invert the fwhm dictionary to get the fwhm from the filter position.
+        """
+        # invert the fwhm dictionary
+        inv_fwhm = {v: k for k, v in self.fwhm.items()}
+        return inv_fwhm
+    
+    def filter_ids2pos(self, 
+                    filter_ids: List[str]) -> List[str]:
+        """Convert the filter ids to filter positions
+        """
+        # convert the filter ids to filter positions
+        filter_pos_lut = self.inverse_filter_id()
+        filter_pos = [filter_pos_lut[filter_id] for filter_id in filter_ids]
+        return filter_pos
+
+    def set_filter_ids(self, 
+                    camera: Literal['HRC', 'LWAC', 'RWAC'],
+                    frame_type: Literal['RGB', 'MSC']) -> List[str]:
+        """Set the filter ids for the given camera and frame type.
+        """
+        # set the filter ids to use according to the camera and frame type
+        if camera == 'HRC':
+            if frame_type == 'RGB':
+                filter_ids = ['HR0', 'HR0', 'HR0'] # initialise with same filter id
+            elif frame_type == 'Single':
+                filter_ids = ['HR0'] # just load the raw HRC frame
+            elif frame_type == 'MSC':
+                filter_ids = ['HR0', 'HR0', 'HR0'] # treat HRC as a multispectral imager
+            else:
+                raise ValueError(f"Unknown frame type {frame_type} for HRC camera")
+        elif camera == 'LWAC':
+            if frame_type == 'RGB':
+                filter_ids = ['L1R', 'L2G', 'L3B']
+            elif frame_type == 'MSC':
+                filter_ids = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06']
+        elif camera == 'RWAC':
+            if frame_type == 'RGB':
+                filter_ids = ['R1R', 'R2G', 'R3B']
+            elif frame_type == 'MSC':
+                filter_ids = ['G07', 'G08', 'G09', 'G10', 'G11', 'G12']
+        else:
+            raise ValueError(f"Unknown camera {camera}")
+            # TODO - add support for NavCams
+        
+        return filter_ids
+    
+class AupeIO:
+    '''Class for loading an AUPE image from a given directory, or sol, scene,
+    trial (optional) specification, for a given camera and frame type.
+    '''
+    def __init__(self, 
+                 camera: Literal['HRC', 'LWAC', 'RWAC'],
+                 frame_type: Literal['RGB', 'MSC'],
+                 sol: str,
+                 scene: str, 
+                 trial: str=None,
+                 filter_ids: List[str]=None, # optionally specify the filter_ids to use (note - not filter_pos codes)
+                 campaign_dir: Path=Path('..','..','data'),
+                 aupe_info_path: Path=Path('..','data','aupe_info.csv')):
+        
+        self.camera = camera
+        self.frame_type = frame_type
+
+        self.aupe_info = AupeInfo(aupe_info_path)
+
+        # set the list of filters to load for given camera and frame type
+        if filter_ids is not None:
+            # check if the given filter ids are valid
+            for filter_id in filter_ids:
+                if filter_id not in self.aupe_info.filter_id.values():
+                    raise ValueError(f"Filter id {filter_id} not found in aupe info")
+        elif frame_type == 'Single':
+            # if frame type is single, then a filter id is required
+            raise ValueError(f"Filter id required for single frame type")
+        else:
+            # otherwise, get the filter ids and positions for the given camera and frame type
+            filter_ids = self.aupe_info.set_filter_ids(camera, frame_type)
+        self.filter_ids = filter_ids
+        self.filter_pos = self.aupe_info.filter_ids2pos(filter_ids)
+
+        # set the input data directory
+        self.campaign_dir = campaign_dir
+        if not self.campaign_dir.exists():
+            raise FileNotFoundError(f"Directory {self.campaign_dir} does not exist")
+        self.sol = sol
+        self.scene = scene
+        if trial is not None:
+            self.scene_dir = Path(campaign_dir, sol, scene, trial)
+        else:
+            self.scene_dir = Path(campaign_dir, sol, scene)
+            trial = 'Trial1'
+        self.trial = trial
+        # check if the input directory exists
+        if not self.scene_dir.exists():
+            raise FileNotFoundError(f"Directory {self.scene_dir} does not exist")
+
+        # set the output data directory
+        self.out_dir = Path(self.campaign_dir,'..', 'processed', 
+                                self.sol, 
+                                self.scene, 
+                                self.trial, 
+                                self.camera,
+                                self.frame_type)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        # initialise the lists of input image filepaths
+        self.input_files = []
+
+        # grab the files that match the filter pos codes
+        # get all the images in the directory
+        png_files = list(self.scene_dir.glob("*.png"))
+
+        for filter_pos in self.filter_pos: # note this should preserve order from specification in set_filter_ids
+            # get the files that match the filter pos code
+            filter_pos_files = [path for path in png_files if filter_pos in path.name]
+            # add the files to the input files list
+            self.input_files += filter_pos_files
+
+    def load_frame(self):
+
+        input_file_dicts = self.file_dicts()
+
+        if self.frame_type == 'Single':
+            if len(input_file_dicts) > 1:
+                raise ValueError(f"Multiple files found for single frame type: {input_file_dicts}")
+            frame = Img(input_file_dicts[0], self.aupe_info)
+        elif self.frame_type == 'RGB':
+            if self.camera == 'HRC':
+                frame = HRC(input_file_dicts, self.aupe_info)
+            elif self.camera == 'LWAC' or self.camera == 'RWAC':
+                frame = WAC_RGB(input_file_dicts, self.aupe_info)
+        elif self.frame_type == 'MSC':
+            # TODO - add support for MSC
+            # frame = MSC(input_file_dicts, self.aupe_info)
+            pass
+        else:
+            raise ValueError(f"Unknown frame type {self.frame_type}")
+        
+        return frame
+    
+    def file_dicts(self) -> List:
+        """For the given filepath, return a dictionary giving:
+        - full file path
+        - file name
+        - sol
+        - scene
+        - trial
+        - output directory
+
+        :param filepath: file path to the image
+        :type filepath: Path
+        :return: File information needed to process the image
+        :rtype: Dict
+        """        
+        input_file_dicts = []
+        for input_file in self.input_files:
+            file_dict = {}
+            file_dict['filepath'] = input_file
+            file_dict['trial'] = self.trial
+            file_dict['scene'] = self.scene
+            file_dict['sol'] = self.sol
+            file_dict['out_dir'] = self.out_dir
+            input_file_dicts.append(file_dict)
+        
+        return input_file_dicts
 
 class CalibrationTarget:
     def __init__(self):
         self.patch_names = []
         self.patch_reflectance = None  # np.ndarray
-        self.patch_srgb = None  # np.ndarray
+        self.patch_srgb = None  # pd.DataFrame
         self.patch_rois = None  # np.ndarray
         self.observed_values = {}  # dict of metrics per patch
 
-    def load_data(self):
+    def load_srgb_data(self):
         filepath = Path('..', 'data', 'colorchecker_srgb_d50.csv')
+        # read the csv file into a pandas dataframe
+        cal_targ_df = pd.read_csv(filepath, index_col=0)
+        self.patch_names = cal_targ_df.columns.to_list()
+        self.patch_srgb = cal_targ_df
+        
+    def load_spectral_data(self):
+        filepath = Path('..', 'data', 'colorchecker_spectra.csv')
         # read the csv file into a pandas dataframe
         cal_targ_df = pd.read_csv(filepath, index_col=0)
 
@@ -313,8 +348,9 @@ class Img:
         cam_num = self.load_image()
         self.camera = aupe_info.cam_dict[cam_num]
         # set cwl and fwhm
-        self.cwl = aupe_info.cwls[self.channel]
-        self.fwhm = aupe_info.fwhms[self.channel]
+        self.cwl = aupe_info.cwl[self.channel]
+        self.fwhm = aupe_info.fwhm[self.channel]
+        self.filter_id = aupe_info.filter_id[self.channel]
 
     def load_image(self):
         """Load the image and metadata from the aupe image file exif data
@@ -337,20 +373,60 @@ class Img:
         self.units = 'DN'
         return int(metadata['AU_camNum'])
 
+    def get_image(self, 
+                  stretch_method: Literal['raw', 'bps', 'wps', '99p']=None
+                  ) -> np.ndarray:
+        """Get a copy of the image data, optionally applying the stretch method
+        :param stretch_method: method for finding the stretch coefficient
+        :type stretch_method: Literal['raw', 'bps', 'wps', '99p'], optional
+        :return: image data
+        :rtype: np.ndarray
+        """
+        if stretch_method is None:
+            image = self.image.copy()
+        else:
+            if self.stretch[stretch_method]['factor'] is None:
+                self.extract_stretch_coefficient(stretch_method)
+            image = np.clip(self.image * self.stretch[stretch_method]['factor'], 0.0, 1.0)        
+        return image
+
+    def apply_stretch(self, stretch_method: Literal['raw', 'bps', 'wps', '99p']='raw'):
+        """Apply the stretch coefficient to the image, and return the stretched image.
+        :param stretch_method: method for finding the stretch coefficient
+        :type stretch_method: Literal['raw', 'bps', 'wps', '99p']
+        :return: stretched image
+        :rtype: np.ndarray
+        """
+        print(f"Stretching image using {LEVEL_DICT[stretch_method]}")
+        if self.stretch[stretch_method]['factor'] is None:
+            self.extract_stretch_coefficient(stretch_method)
+        disp_img = np.clip(self.image * self.stretch[stretch_method]['factor'], 0.0, 1.0)        
+        
+        return disp_img
+
     def extract_stretch_coefficient(self, 
                 method: Literal['raw', 'bps', 'wps', '99p']='raw',
                 wp_roi: Tuple[int, int, int, int]=None) -> float:
         """Get the stretch coefficient for the given image according to
         the selected method.
+        'raw': no stretch, just divide by the max allowed value
         'bps': "brightest pixel stretch" - stretches such that the brightest pixel
         has a value of 1.0.
+        '99p': "99th percentile stretch" - stretches such that the 99th percentile
+        of the image is 1.0.
         'wps': "white patch stretch" - stretches such that the white patch of the
         MacBeth colorchecker has a value of 1.0.
 
         :param method: method for finding the stretch coefficient
         :type method: Literal['raw', 'bps', 'wps', '99p']
-        """        
-        if method == 'bps':
+        """      
+        if method == 'raw':
+            print('No stretch method chosen')  
+            # set the stretch coefficient to 1.0 / max_val
+            self.stretch['raw'] = {}
+            self.stretch['raw']['factor'] = 1.0 / ((2**BIT_DEPTH) - 1)
+            self.stretch['raw']['roi'] = (0, 0, self.width, self.height)
+        elif method == 'bps':
             # get the brightest pixel value and location
             bp_val = np.nanmax(self.image)            
             bp_loc = np.unravel_index(np.argmax(self.image, axis=None), self.image.shape)
@@ -364,7 +440,7 @@ class Img:
             # set the stretch coefficient to 1.0 / bp_val
             self.stretch['99p'] = {}
             self.stretch['99p']['factor'] = 1.0 / pct_val
-            # ROI for percentile stretch is not valid.
+            self.stretch['99p']['roi'] = (0, 0, self.width, self.height)
         elif method == 'wps':
             if wp_roi is None:
                 # zoom in on the colorchecker target
@@ -396,8 +472,6 @@ class Img:
             self.stretch['wps'] = {}         
             self.stretch['wps']['factor'] = 1.0 / wp_val
             self.stretch['wps']['roi'] = wp_loc
-        elif method == 'raw':
-            print('No stretch method chosen')
         else:
             raise ValueError(f"Unknown stretch method: {method}")
     
@@ -413,7 +487,7 @@ class Img:
         if method == 'all':             
             self.stretch = {
                 'raw': {
-                    'factor': 1.0,
+                    'factor':  1.0 / ((2**BIT_DEPTH) - 1),
                     'roi': [None, None, None, None]
                 },
                 'bps': {
@@ -460,7 +534,7 @@ class Img:
         self.image = np.divide(self.image, self.exposure)
         self.units = 'DN/s'
         self.dtype = self.image.dtype
-        # update strretch coefficients
+        # update stretch coefficients
         self.stretch['raw']['factor'] = self.stretch['raw']['factor'] * self.exposure
 
         if self.stretch['bps']['factor'] is not None:
@@ -477,7 +551,9 @@ class Img:
     def bias_correction(self):
         pass
 
-    def show_image(self, stretch_method: Literal['raw', 'bps', 'wps', '99p']='raw'):
+    def show_image(self, 
+                   stretch_method: Literal['raw', 'bps', 'wps', '99p']='raw'
+                ) -> Tuple[plt.Figure, plt.Axes]:
         """Display the image using matplotlib,
         and optionally show the histogram of the image data.
         """  
@@ -490,20 +566,17 @@ class Img:
         if self.stretch[stretch_method]['factor'] != 1.0:
             self.extract_stretch_coefficient(stretch_method)
 
-        if stretch_method != 'raw':
-            print(f"Stretching image using {LEVEL_DICT[stretch_method]}")
-            disp_img = np.clip(self.image * self.stretch[stretch_method]['factor'], 0.0, 1.0)        
-        else:
-            disp_img = self.image / 255
+        disp_img = self.get_image(stretch_method)
 
         fig, ax = plt.subplots(1,2, figsize=(8, 4))
         disp = ax[0].imshow(disp_img, vmin=0.0, vmax=1.0, cmap='viridis')
         # add colorbar
         plt.colorbar(disp,fraction=0.046, pad=0.10, orientation='horizontal')
         
-        ax[1].hist(disp_img.ravel()/self.stretch[stretch_method]['factor'], bins=256, color='gray', alpha=0.5)
+        ax[1].hist(disp_img.ravel(), bins=256, color='gray', alpha=0.5)
         
         ax[1].set_xlabel(f"Pixel Value {self.units} ({stretch_method})")
+        ax[1].set_ylabel("Frequency")
         ax[1].tick_params(labelleft=False, left=False)
         # add title and labels
         fig.suptitle(title)
@@ -514,6 +587,8 @@ class Img:
         plt.axis('off')
         # set the title
         plt.title(title)
+
+        return fig, ax
 
     def export_image(self, stretch_method: Literal['raw', 'bps', 'wps', '99p']='bps'):
         """Export the image to a file, using the stretch method
@@ -555,7 +630,7 @@ class Img:
         }
         # use opencv to write the image to file
         # check and make a single frame output directory
-        out_dir = self.out_dir / 'single_frame'
+        out_dir = self.out_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / title
         plt.imsave(
@@ -594,15 +669,6 @@ class RGB:
         self.out_dir = self.red.out_dir
         self.stretch = ''
         self.calibration_target = None
-
-    def display_histogram(self):
-        pass
-
-    def display_channels(self):
-        pass
-
-    def display_channel_histograms(self):
-        pass
 
     def exposure_correct(self):
         """Exposure correct each channel
@@ -724,6 +790,30 @@ class RGB:
         else:
             self.balance_vector[method] = np.zeros(3)            
 
+    def get_image(self,
+                  colour_correction: Literal['raw', 'bps', 'wps', '99p', 'ccm']='raw'
+                  ) -> np.ndarray:
+        """Get a copy of the image data, optionally applying the stretch method
+        :param colour_correction: method for finding the stretch coefficient
+        :type colour_correction: Literal['raw', 'bps', 'wps', '99p', 'ccm'], optional
+        :return: image data
+        :rtype: np.ndarray
+        """
+        if colour_correction == 'raw':
+            image = self.rgb_image.copy()
+        elif colour_correction == 'ccm':
+            # apply the colour correction matrix
+            image = np.clip(self.rgb_image @ self.ccm, 0.0, 1.0)
+        else:
+            if self.balance_vector[colour_correction][0] == 0.0:
+                self.extract_balance_vector(colour_correction)
+            # apply the balance vector
+            r_disp_img = np.clip(self.red.image * self.balance_vector[colour_correction][0], 0.0, 1.0)        
+            g_disp_img = np.clip(self.green.image * self.balance_vector[colour_correction][1], 0.0, 1.0)
+            b_disp_img = np.clip(self.blue.image * self.balance_vector[colour_correction][2], 0.0, 1.0)
+            image = np.stack([r_disp_img, g_disp_img, b_disp_img], axis=2)
+        return image
+
     def show_image(self, 
                    colour_correction: Literal['raw', 'bps', 'wps', '99p', 'ccm']='raw'):
         """Display the RGB image using matplotlib,
@@ -731,21 +821,15 @@ class RGB:
         """
         title = f"{self.sol} {self.scene} {self.trial} {self.camera} RGB ({LEVEL_DICT[colour_correction]})"
 
-        # apply balance vector or colour correction matrix
-        if colour_correction != 'ccm':
-            # apply balance vector
-            disp_img = self.apply_balance_vector(colour_correction)
-        else:
-            # apply colour correction matrix
-            pass        
+        disp_img = self.get_image(colour_correction)   
         
         fig, ax = plt.subplots(1,2, figsize=(8, 4))  
         disp = ax[0].imshow(disp_img, vmin=0.0, vmax=1.0)
 
         # for each channel, show a histogram - retain original image units
-        ax[1].hist(disp_img[:,:,0].ravel()/self.balance_vector[colour_correction][0], bins=256, color='red', alpha=0.5)
-        ax[1].hist(disp_img[:,:,1].ravel()/self.balance_vector[colour_correction][1], bins=256, color='green', alpha=0.5)
-        ax[1].hist(disp_img[:,:,2].ravel()/self.balance_vector[colour_correction][2], bins=256, color='blue', alpha=0.5)
+        ax[1].hist(disp_img[:,:,0].ravel(), bins=256, histtype='stepfilled', color='red', alpha=0.5)
+        ax[1].hist(disp_img[:,:,1].ravel(), bins=256, histtype='stepfilled', color='green', alpha=0.5)
+        ax[1].hist(disp_img[:,:,2].ravel(), bins=256, histtype='stepfilled', color='blue', alpha=0.5)
         ax[1].tick_params(labelleft=False, left=False)
         # label x axis with units
         ax[1].set_xlabel(f"Pixel Value {self.units} ({colour_correction})")
@@ -759,6 +843,8 @@ class RGB:
         # set the title
         plt.title(title)
 
+        return fig, ax
+
     def export_image(self, colour_correction: Literal['raw', 'bps', 'wps', '99p', 'ccm']='bps'):
         """Export the image to a file, using the stretch method
 
@@ -768,6 +854,7 @@ class RGB:
         
         title = f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_RGB_{colour_correction}.png"
 
+        print(f"Exporting image using {LEVEL_DICT[colour_correction]}")
         if colour_correction == 'raw':
             if self.units == 'DN/s':
                 # convert to uint8
@@ -775,7 +862,6 @@ class RGB:
             else:
                 disp_img = (self.rgb_image).astype(np.uint8)
         else:
-            print(f"Exporting image using {LEVEL_DICT[colour_correction]}")
             if (self.balance_vector[colour_correction] == np.zeros(3)).all():
                 self.extract_balance_vector(colour_correction)
             disp_img = np.clip(self.apply_balance_vector(colour_correction), 0.0, 1.0)        
@@ -805,7 +891,6 @@ class RGB:
     
         return out_file
 
-
 class HRC(RGB):
     """HRC class inherits the methods of the RGB class, but handles HRC by
     loading the same un-debayered image into each channel.
@@ -817,9 +902,21 @@ class HRC(RGB):
                  aupe_info: AupeInfo):
         super().__init__(rgb_path_dict, aupe_info)
         self.debayered = False
-
-    def display_raw(self):
-        pass
+        
+        # relabel the channels of the hrc r,g,b images, and update other
+        # attributes
+        self.red.channel = 'HRCR'
+        self.red.cwl = aupe_info.cwl['HRCR']
+        self.red.fwhm = aupe_info.fwhm['HRCR']  
+        self.red.filter_id = aupe_info.filter_id['HRCR']
+        self.green.channel = 'HRCG'
+        self.green.cwl = aupe_info.cwl['HRCG']
+        self.green.fwhm = aupe_info.fwhm['HRCG']
+        self.green.filter_id = aupe_info.filter_id['HRCG']
+        self.blue.channel = 'HRCB'
+        self.blue.cwl = aupe_info.cwl['HRCB']
+        self.blue.fwhm = aupe_info.fwhm['HRCB']
+        self.blue.filter_id = aupe_info.filter_id['HRCB']
 
     def debayer(self):
         # debayer the image
@@ -832,7 +929,13 @@ class HRC(RGB):
         self.reset_balance_vector('all')
         self.debayered = True
 
-class WAC_MS:
+        
+class WAC_RGB(RGB):
+    def __init__(self, rgb_path_dict: Tuple[Dict, Dict, Dict],
+                 aupe_info: AupeInfo):
+        super().__init__(rgb_path_dict, aupe_info)
+
+class MSC:
     def __init__(self):
         self.band_images = {}
         self.band_channels = []
