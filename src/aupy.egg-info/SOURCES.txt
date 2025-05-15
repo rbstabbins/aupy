@@ -1,0 +1,6 @@
+aupy.py
+setup.py
+aupy.egg-info/PKG-INFO
+aupy.egg-info/SOURCES.txt
+aupy.egg-info/dependency_links.txt
+aupy.egg-info/top_level.txt
