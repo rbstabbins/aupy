@@ -1646,7 +1646,7 @@ class RGB:
         """Display the RGB image using matplotlib,
         and optionally show the histogram of the image data.
         """
-        title = f"{self.sol} {self.scene} {self.trial} {self.camera} RGB ({LEVEL_DICT[colour_correction]})"
+        title = f"{self.sol} {self.scene} {self.trial} {self.camera} R({self.red.cwl} nm) G({self.green.cwl} nm) B({self.blue.cwl} nm) ({colour_correction})"
 
         disp_img = self.get_image(colour_correction)
         
@@ -2218,6 +2218,11 @@ class StereoTools:
             self.homography, 
             (dst_mat.shape[1], dst_mat.shape[0])
         )
+
+        # apply the masking of the warped image to the destination image
+        mask_map = wrp_mat[:,:,0] == 0
+        # where the mask is true, set the destination image to 0
+        dst_mat[mask_map] = 0
 
         if isinstance(wrp_frame, Img):
             wrp_frame.image = wrp_mat
