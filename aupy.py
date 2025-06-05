@@ -5,29 +5,27 @@
 # Natural History Museum, London
 # 9/5/2025
 
-# from copy import deepcopy
-from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Literal, Tuple, Union
+from typing import Dict, List, Literal, Tuple, Union, Optional
 import cv2
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import NDArray
 import pandas as pd
 from roipoly import RoiPoly
 from scipy.stats import linregress
-import scipy.optimize
+from scipy.optimize import curve_fit
 from scipy.interpolate import interp1d
 from spectral import envi
 import PIL.Image
 
 import colour
 from colour.characterisation import CCS_COLOURCHECKERS
-from colour_checker_detection import detect_colour_checkers_inference
+from colour_checker_detection import detect_colour_checkers_inference as detect_target
 from colour_checker_detection.detection.common import sample_colour_checker, as_int32_array
 
-LEVEL_DICT = {
+STRETCH_DICT = {
     'raw': 'raw image no stretch',
     'bps': 'brightest pixel stretch', # for individual channels/bands/frames
     'bpb': 'brightest pixel balanced', # each channel/band/frame is bps stretched independently
@@ -54,29 +52,52 @@ WP_BLUE = 243
 
 BIT_DEPTH = 8
 
+def gamma_curve(x: NDArray, gamma: float) -> NDArray:
+    """Gamma curve function, to use for Gamma fitting routine.
+
+    :param x: abscissa values
+    :type x: NDArray
+    :param a: Initial estimate of amplitude
+    :type a: float
+    :param gamma: initial estimate of gamma
+    :type gamma: float
+    :return: ordinate values of the Gamma curve function
+    :rtype: NDArray
+    """
+    return (x ** gamma)
+
+def gauss(x: NDArray, a: float, x0: float, sigma: float) -> NDArray:
+    """Gaussian function, to use for Gauss fitting routine.
+
+    :param x: abscissa values
+    :type x: NDArray
+    :param a: Initial estimate of amplitude
+    :type a: float
+    :param x0: initial estimate for centre (mean)
+    :type x0: float
+    :param sigma: initial estimate of width (standard deviation)
+    :type sigma: float
+    :return: ordinate values of the Gaussian function
+    :rtype: NDArray
+    """        
+    return a*np.exp(-(x-x0)**2/(2*sigma**2))
 class AupeInfo:
-    """A class to hold the AUPE information for a given dataset.
-    This includes the filter positions, filter ids, cwl and fwhm.
+    """A class to hold the AUPE information for a given dataset, that is not
+    included in the image metadata. This includes the filter positions, 
+    filter ids, cwl and fwhm.
+
+    The purpose of this is to handle changes of these values between different 
+    versions of AUPE and previous datasets, hence access via csv file. 
+    
+    We should be able to log multiple AUPE instances, and load the appropriate
+    one for the given dataset.
     """    
     def __init__(self, filepath: Path):
-        """Holds AUPE information not included in the 
-        image metadata, namely mapping filter positions and ids to
-        cwl and fwhm. 
-        
-        Note, these values change between different versions of AUPE 
-        and previous datasets, hence access via csv file. We should
-        be able to log multiple AUPE instances, and load the appropriate
-        one for the given dataset.
-
-        In future, allow to import
-        full transmission spectra, like sptk.
-
+        """
         :param filepath: file holding aupe information
         :type filepath: Path
         """
-        # read the filepath csv file into the object
-        # read the filepath csv file into the object
-        # expect header lines of version and date
+        # read header lines of version and date
         header = pd.read_csv(filepath, nrows=2, usecols=[0,1], index_col=0)
         self.aupe_info_version = header.loc['version'].values[0]
         self.aupe_info_date = header.loc['date'].values[0]
@@ -87,7 +108,7 @@ class AupeInfo:
         self.cwl = aupe_info['cwl'].to_dict()
         self.fwhm = aupe_info['fwhm'].to_dict()
 
-        # cam number -> camera does not typically change between AUPE versions.
+        # cam number -> camera (does not typically change between AUPE versions)
         self.cam_dict = {
                 2: 'HRC',
                 0: 'LWAC',
@@ -96,33 +117,43 @@ class AupeInfo:
         # self.load_flat_fields() # TODO
         # self.load_bias_frames() # TODO
         
-    def inverse_filter_id(self):
+    def inverse_filter_id(self) -> Dict[str, str]:
         """Invert the filter id dictionary to get the filter id from the filter
         position.
+
+        :return: Inverted filter id dictionary
+        :rtype: Dict[str, str]
         """
-        # invert the filter id dictionary
         inv_filter_id = {v: k for k, v in self.filter_id.items()}
         return inv_filter_id
     
-    def inverse_cwl(self):
+    def inverse_cwl(self) -> Dict[str, int]:
         """Invert the cwl dictionary to get the cwl from the filter position.
+
+        :return: Inverted cwl dictionary
+        :rtype: Dict[str, str]
         """
-        # invert the cwl dictionary
         inv_cwl = {v: k for k, v in self.cwl.items()}
         return inv_cwl
     
-    def inverse_fwhm(self):
+    def inverse_fwhm(self) -> Dict[str, int]:
         """Invert the fwhm dictionary to get the fwhm from the filter position.
+
+        :return: Inverted fwhm dictionary
+        :rtype: Dict[str, str]
         """
-        # invert the fwhm dictionary
         inv_fwhm = {v: k for k, v in self.fwhm.items()}
         return inv_fwhm
     
     def filter_ids2pos(self, 
                     filter_ids: List[str]) -> List[str]:
-        """Convert the filter ids to filter positions
+        """Convert a list of filter ids to a list of filter positions
+
+        :param filter_ids: List of filter ids to convert
+        :type filter_ids: List[str]
+        :return: List of filter positions corresponding to the filter ids
+        :rtype: List[str]
         """
-        # convert the filter ids to filter positions
         filter_pos_lut = self.inverse_filter_id()
         filter_pos = [filter_pos_lut[filter_id] for filter_id in filter_ids]
         return filter_pos
@@ -130,33 +161,51 @@ class AupeInfo:
     def set_filter_ids(self, 
                     camera: Literal['HRC', 'LWAC', 'RWAC', 'LRWAC'],
                     frame_type: Literal['RGB', 'MSC']) -> List[str]:
-        """Set the filter ids for the given camera and frame type.
-        """
-        # set the filter ids to use according to the camera and frame type
+        """Set the filter ids to load for the given camera and frame type.
+
+        :param camera: Camera to load the image from
+        :type camera: Literal['HRC', 'LWAC', 'RWAC', 'LRWAC']
+        :param frame_type: Frame type to load the image into
+        :type frame_type: Literal['RGB', 'MSC']
+        :return: List of filter ids to load for the given camera and frame type
+        :rtype: List[str]
+        """        
         filter_ids = []
-        if camera == 'HRC':
+
+        if camera == 'HRC': # initialise with raw HRC frame - ID HR0
             if frame_type == 'RGB':
-                filter_ids = ['HR0', 'HR0', 'HR0'] # initialise with same filter id
+                filter_ids = ['HR0', 'HR0', 'HR0']
             elif frame_type == 'Single':
-                filter_ids = ['HR0'] # just load the raw HRC frame
+                filter_ids = ['HR0']
             elif frame_type == 'MSC':
-                filter_ids = ['HR0', 'HR0', 'HR0'] # treat HRC as a multispectral imager
+                filter_ids = ['HR0', 'HR0', 'HR0']
             else:
-                raise ValueError(f"Unknown frame type {frame_type} for HRC camera")
+                raise ValueError(f"Unknown frame type {frame_type} for HRC")
+            
         elif camera == 'LWAC':
             if frame_type == 'RGB':
                 filter_ids = ['L1R', 'L2G', 'L3B']
             elif frame_type == 'MSC':
                 filter_ids = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06']
+
         elif camera == 'RWAC':
             if frame_type == 'RGB':
                 filter_ids = ['R1R', 'R2G', 'R3B']
             elif frame_type == 'MSC':
                 filter_ids = ['G07', 'G08', 'G09', 'G10', 'G11', 'G12']
+
+        # 'virtual' camera - holds LWAC->warped-2-RWAC images
         elif camera == 'LRWAC':
             if frame_type == 'MSC':
                 filter_ids = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06',
                               'G07', 'G08', 'G09', 'G10', 'G11', 'G12']
+                
+        # 'virtual' camera - holds RWAC->warped-2-HRC images
+        elif camera == 'RWHRC':
+            if frame_type == 'MSC':
+                filter_ids = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06',
+                              'G07', 'G08', 'G09', 'G10', 'G11', 'G12']
+                
         else:
             raise ValueError(f"Unknown camera {camera}")
             # TODO - add support for NavCams
@@ -164,19 +213,16 @@ class AupeInfo:
         return filter_ids
     
 class AupeIO:
-    '''Class for loading an AUPE image from a given directory, or sol, scene,
-    trial (optional) specification, for a given camera and frame type.
-
-    :param camera: Camera to load the image from
-    :type camera: Literal['HRC', 'LWAC', 'RWAC']
-    :param frame_type: Frame type to load the image into
-    :type frame_type: Literal['Single', 'RGB', 'MSC']
-    :param sol: Sol to load the image from
-    :type sol: str
-    :param scene: Scene to load the image from
-    :type scene: str
-    :param trial: Trial to load the image from
-    :type trial: str
+    '''Class for preparing image filepaths for a given AUPE camera, frame type,
+    sol, scene, and trial (optional). 
+    
+    Subset of filter ids can be specified.
+    
+    The function assumes that the images are stored in 'data' directory, 
+    adjacent to the script (or notebook) running the programme. 
+    
+    It assumes that information describing the instance of aupe is stored in a 
+    'data' subdirectory next to the aupy.py module.    
     '''
     def __init__(self, 
                  camera: Literal['HRC', 'LWAC', 'RWAC'],
@@ -184,16 +230,35 @@ class AupeIO:
                  sol: str,
                  scene: str, 
                  trial: str='',
-                 filter_ids: List[str]=[''], # optionally specify the filter_ids to use (note - not filter_pos codes)
+                 filter_ids: Optional[List[str]]=None,
                  campaign_dir: Path=Path('..','data'),
-                 aupe_info_path: Path=Path('.','data','aupe_info.csv')):
-        
+                 aupe_info_path: Path=Path('.','data','aupe_info.csv')) -> None:
+        """
+        :param camera: Camera to load the image from
+        :type camera: Literal['HRC', 'LWAC', 'RWAC']
+        :param frame_type: Frame type to load the image into
+        :type frame_type: Literal['Single', 'RGB', 'MSC']
+        :param sol: Sol to load the image from
+        :type sol: str
+        :param scene: Scene to load the image from
+        :type scene: str
+        :param trial: Trial to load the image from
+        :type trial: str
+        :param filter_ids: List of filter ids to load the image from, 
+            defaults to ['']
+        :type filter_ids: List[str]
+        :param campaign_dir: Directory holding the campaign data, 
+            defaults to Path('..','data')
+        :type campaign_dir: Path
+        :param aupe_info_path: Path to the aupe_info.csv file, 
+            defaults to Path('.','data','aupe_info.csv')
+        :type aupe_info_path: Path
+        """
         self.camera = camera
         self.frame_type = frame_type
-
-        self.campaign_dir = campaign_dir
         self.sol = sol
         self.scene = scene
+        self.campaign_dir = campaign_dir
 
         # handle the case where trial is not in input directory
         if trial != '':
@@ -210,17 +275,17 @@ class AupeIO:
 
         self.out_dir = Path(self.campaign_dir,
                                 '..', 
-                                'processed', 
-                                self.sol, 
-                                self.scene, 
-                                self.trial, 
+                                'processed',
+                                self.sol,
+                                self.scene,
+                                self.trial,
                                 self.camera,
                                 self.frame_type)
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.aupe_info = AupeInfo(aupe_info_path)
 
         # set the list of filters to load for given camera and frame type
-        self.aupe_info = AupeInfo(aupe_info_path)
-        if filter_ids[0] != '':
+        if filter_ids is not None and filter_ids[0] != '':
             # check if the given filter ids are valid
             for filter_id in filter_ids:
                 if filter_id not in self.aupe_info.filter_id.values():
@@ -232,33 +297,31 @@ class AupeIO:
             # otherwise, get the filters for the given camera and frame type
             filter_ids = self.aupe_info.set_filter_ids(camera, frame_type)
         
-        self.filter_ids = filter_ids # e.g. 'G01', 'G02', 'L1R', etc
-        self.filter_pos = self.aupe_info.filter_ids2pos(filter_ids) # e.g. 'LWAC1', 'LWAC2', etc
-        
-        # initialise the lists of input image filepaths
+        self.filter_ids = filter_ids #e.g. 'G01', 'G02', 'L1R', etc
+        self.filter_pos = self.aupe_info.filter_ids2pos(filter_ids) #e.g.'LWAC1'
+                
+        # find the image filepaths to load into the frame
         self.input_files = []
-
-        # get all the images in the directory
         png_files = list(self.scene_dir.glob("*.png"))
-
-        # grab the files that match the filter pos codes
         for filter_pos in self.filter_pos: # note order preserved
             # get the files that match the filter pos code
-            filter_pos_files = [path for path in png_files if filter_pos+'_' in path.name]
+            files = [path for path in png_files if filter_pos+'_' in path.name]
             # add the files to the input files list
-            self.input_files += filter_pos_files
+            self.input_files += files
 
-    def load_frame(self):
+    def load_frame(self) -> Union[None, 'Img', 'HRC', 'WAC_RGB', 'RGB', 'MSC']:
         """Load the frame from the input files, and return the frame object.
-        """        
 
+        :return: Frame object for the given camera and frame type
+        :rtype: Union[Img, HRC, WAC_RGB, MSC]
+        """        
         # if there are no files, skip
         if len(self.input_files) == 0:
-            print(f"No files found for {self.camera} {self.frame_type} {self.sol} {self.scene} {self.trial}")
-            return None
+            # raise a file not found error
+            raise FileNotFoundError(
+                        "No files found. Please check the sol/scene/trial.")
 
-        input_file_dicts = self.file_dicts()     
-
+        input_file_dicts = self.file_dicts()
         if self.frame_type == 'Single':
             if len(input_file_dicts) > 1:
                 raise ValueError(f"Multiple files found for single frame type: {input_file_dicts}")
@@ -267,41 +330,46 @@ class AupeIO:
         
         elif self.frame_type == 'RGB':
             if self.camera == 'HRC':
-                frame = HRC(input_file_dicts, self.aupe_info)
+                frame = HRC((input_file_dicts[0],
+                             input_file_dicts[1],
+                             input_file_dicts[2]), 
+                             self.aupe_info)
                 return frame
             elif self.camera == 'LWAC' or self.camera == 'RWAC':
-                frame = WAC_RGB.from_filedicts(input_file_dicts, self.aupe_info)
+                frame = WAC_RGB.from_filedicts((input_file_dicts[0],
+                                                input_file_dicts[1],
+                                                input_file_dicts[2],), 
+                                                self.aupe_info)
                 return frame
         
         elif self.frame_type == 'MSC':
             frame = MSC(input_file_dicts, self.aupe_info)
             return frame
+        
         else:
             raise ValueError(f"Unknown frame type {self.frame_type}")
     
-    def file_dicts(self) -> List:
-        """For the given filepath, return a dictionary giving:
+    def file_dicts(self) -> List[Dict[str, Union[str, Path]]]:
+        """For the given filepath, return a list (to preserve order) of 
+        dictionaries giving:
         - full file path
-        - file name
         - filter id
         - sol
         - scene
         - trial
         - output directory
 
-        :param filepath: file path to the image
-        :type filepath: Path
         :return: File information needed to process the image
-        :rtype: Dict
+        :rtype: List[Dict[str, Union[str, Path]]]
         """        
         input_file_dicts = []
         for i, input_file in enumerate(self.input_files):
             file_dict = {}
             file_dict['filepath'] = input_file
             file_dict['filter_id'] = self.filter_ids[i]
-            file_dict['trial'] = self.trial
-            file_dict['scene'] = self.scene
             file_dict['sol'] = self.sol
+            file_dict['scene'] = self.scene
+            file_dict['trial'] = self.trial
             file_dict['out_dir'] = self.out_dir
             input_file_dicts.append(file_dict)
         
@@ -309,7 +377,11 @@ class AupeIO:
 
 class CalibrationTarget:
     """Calibration Target Class for hosting reference and observed calibration
-    target patch values, and the colour correction matrix.
+    target patch values, and the colour correction matrix, as well
+    as methods for finding and analysing the calibration target within a frame.
+
+    Can specify the illuminant and colour checker to use for the calibration
+    target. The default is ICC D50 and ColorChecker24 - After November 2014.
     """    
     def __init__(self,
                 illuminant: Literal[
@@ -317,7 +389,6 @@ class CalibrationTarget:
                      'D50', 'D55', 'D65', 'D75', 
                      'ICC D50']='ICC D50',
                 colour_checker: Literal[
-                    'ColorChecker24 - After November 2014',
                     'ColorChecker 1976',
                     "ColorChecker 2005",
                     "BabelColor Average",
@@ -329,12 +400,14 @@ class CalibrationTarget:
                 ) -> None:
         """Initialise the calibration target class
 
-        :param illuminant: Illuminant to use for the calibration target
+        :param illuminant: Illuminant to use for the calibration target,
+            defaults to 'ICC D50'
         :type illuminant: Literal[
             'A', 'B', 'C',
             'D50', 'D55', 'D65', 'D75',
             'ICC D50']
-        :param colour_checker: Colour checker to use for the calibration target
+        :param colour_checker: Colour checker to use for the calibration target,
+            defaults to 'ColorChecker24 - After November 2014'
         :type colour_checker: Literal[
             'ColorChecker24 - After November 2014',
             'ColorChecker 1976',
@@ -345,55 +418,42 @@ class CalibrationTarget:
             "ColorCheckerSG - Before November 2014",
             "ColorCheckerSG - After November 2014",
             "TE226 V2"]
-        :rtype: None
-        """        
+        """
         # reference values
         self.illuminant = illuminant
         self.colour_checker = colour_checker
-        self.patch_ref_xyY = self.load_ref_vals('xyY', illuminant, colour_checker)
-        self.patch_ref_XYZ = self.load_ref_vals('XYZ', illuminant, colour_checker)
-        self.patch_ref_sRGB = self.load_ref_vals('sRGB', illuminant, colour_checker)
-        self.patch_names = list(CCS_COLOURCHECKERS['ColorChecker24 - After November 2014'].data.keys())
-        self.rows = CCS_COLOURCHECKERS['ColorChecker24 - After November 2014'].rows
-        self.cols = CCS_COLOURCHECKERS['ColorChecker24 - After November 2014'].columns
-        self.patch_ref_refl = self.load_spectral_data()  # high resolution spectral reflectance data
+        self.patch_ref_xyY = self.load_patch_colours('xyY')
+        self.patch_ref_XYZ = self.load_patch_colours('XYZ')
+        self.patch_ref_sRGB = self.load_patch_colours('sRGB')
+        self.patch_names = list(CCS_COLOURCHECKERS[colour_checker].data.keys())
+        self.rows = CCS_COLOURCHECKERS[self.colour_checker].rows
+        self.cols = CCS_COLOURCHECKERS[self.colour_checker].columns
+        self.patch_ref_refl = self.load_patch_spectra()
         # observed values
         self.target_outline = np.zeros((4,2))
-        self.patch_rois = None  # TODO figure out how to get patch rois in the original image - should be way to invert via target_outline 
-        self.ccm = np.zeros((3,3))
+        self.ccm = np.zeros((3,3)) # Colour Correction Matrix
+        self.gamma = 1.0
         self.patch_obs_drgb = None # do we need this?
-        self.patch_obs_srgb = None  # do we need this?   
-        # TODO
+        self.patch_obs_srgb = None  # do we need this?
         self.patch_obs_refl = None  # np.ndarray
         
-    def load_ref_vals(self, 
-                space: Literal['xyY', 'XYZ', 'sRGB'],
-                illuminant: Literal[
-                    'A', 'B', 'C', 'D50', 'D55', 'D65', 'D75', 'ICC D50'
-                ]='ICC D50',
-                colour_checker: Literal[
-                    'ColorChecker24 - After November 2014',
-                    'ColorChecker 1976',
-                    "ColorChecker 2005",
-                    "BabelColor Average",
-                    "ColorChecker24 - Before November 2014",
-                    "ColorChecker24 - After November 2014",
-                    "ColorCheckerSG - Before November 2014",
-                    "ColorCheckerSG - After November 2014",
-                    "TE226 V2"]='ColorChecker24 - After November 2014'
+    def load_patch_colours(self, 
+                space: Literal['xyY', 'XYZ', 'sRGB']
                 ) -> NDArray:
-        """Load reference values for the calibration target patches
+        """Load reference colours for the calibration target patches
         via the colour science python library.
         
         :param space: Colour space to use for the reference values
         :type space: Literal['xyY', 'XYZ', 'sRGB']
+        :return: Reference colours for the calibration target patches in the
+        specified colour space.
         :rtype: NDArray
-        """     
-        # load reference values from the colour science library   
-        ref_ct = CCS_COLOURCHECKERS[colour_checker]
+        """
+        # load reference values from the colour science library
+        ref_ct = CCS_COLOURCHECKERS[self.colour_checker]
 
         # get xyY values
-        ref_ct_xyY = list(ref_ct.data.values())
+        ref_ct_xyY = np.array(list(ref_ct.data.values()))
         if space == 'xyY':
             return ref_ct_xyY
         
@@ -404,16 +464,18 @@ class CalibrationTarget:
 
         # update the illuminant
         illuminant_ccs = colour.CCS_ILLUMINANTS[
-            "CIE 1931 2 Degree Standard Observer"][illuminant]
+            "CIE 1931 2 Degree Standard Observer"][self.illuminant]
 
-        # get sRGB values
-        ref_ct_RGB = colour.XYZ_to_sRGB(ref_ct_XYZ, illuminant_ccs, apply_cctf_encoding=False)
+        # get sRGB values (without Gamma encoding)
+        ref_ct_RGB = colour.XYZ_to_sRGB(ref_ct_XYZ, illuminant_ccs, 
+                                                apply_cctf_encoding=False)
         if space == 'sRGB':
             return ref_ct_RGB
+        
         else:
-            raise ValueError(f"Unknown space {space} for reference colourchecker data")
+            raise ValueError(f"Unknown space {space} for colourchecker data")
 
-    def load_spectral_data(self):
+    def load_patch_spectra(self)-> Dict[str, NDArray]:
         """Load the high resolution spectral reflectance data for the 
         calibration target patches.
 
@@ -422,22 +484,25 @@ class CalibrationTarget:
 
         Note that the reflectance values are given in percentage (0 - 100), so 
         we convert them to reflectance values (0 - 1) by dividing by 100.
+
+        :return: Dictionary containing the wavelengths and reflectance values
+        :rtype: Dict[str, NDArray]
         """        
         filepath = Path('.', 'data', 'colorchecker_spectra.csv')
         # read the csv file into a pandas dataframe
-        spectral_data = pd.read_csv(filepath, index_col=0, header=1)
+        data = pd.read_csv(filepath, index_col=0, header=1)
         # convert the dataframe to a dictionary
         patch_ref_refl = {}
-        patch_ref_refl['wavelengths'] = spectral_data.index.to_numpy()
-        patch_ref_refl['reflectance'] = np.clip(spectral_data.to_numpy() / 100, 0,1) # convert to reflectance values, and clamp to 0-1 range
+        patch_ref_refl['wavelengths'] = data.index.to_numpy()
+        # convert to reflectance values, and clamp to 0-1 range
+        patch_ref_refl['reflectance'] = np.clip(data.to_numpy() / 100, 0,1)
     
         return patch_ref_refl
 
-    def sample_patch_ref_refl(self,
-                              frame) -> NDArray:
-        """Sample the reference patch reflectance values, given by the reference
-        csv file, with the transmission profiles of the bands of the given frame
-        (must be an MSC frame).
+    def sample_patch_spectra(self, frame: 'MSC') -> NDArray:
+        """Sample the reference patch reflectance spectra, given by the 
+        reference csv file, with the transmission profiles of the bands of the 
+        given frame (must be an MSC frame).
         
         :param frame: The frame to get the transmission profiles from to 
             sample the reference patch reflectance values with.
@@ -451,53 +516,216 @@ class CalibrationTarget:
         # interpolate the reference patch reflectance spectra to the frame band
         # transmission wavelengths
         patch_refl_interp = interp1d(
-                                    self.patch_ref_refl['wavelengths'], 
-                                    self.patch_ref_refl['reflectance'], 
-                                    axis=0, 
-                                    bounds_error=False, 
+                                    self.patch_ref_refl['wavelengths'],
+                                    self.patch_ref_refl['reflectance'],
+                                    axis=0,
+                                    bounds_error=False,
                                     fill_value='extrapolate')
         patch_refl = patch_refl_interp(frame.response_wavelengths)
 
-        # sample the reference patch reflectance values for each band of the 
+        # sample the reference patch reflectance values for each band of the
         # frame
-        # i.e. R[cwl] = sum_lambda(R[lambda] * T_cwl[lambda]) / sum_lambda(T_cwl[lambda])
+        # i.e. R[cwl] = sum_wvl(R[wvl] * T_cwl[wvl]) / sum_lambda(T_cwl[wvl])
         patch_refl_vals = np.divide(
-                    np.matmul(frame.response_functions.T, patch_refl).T,
-                    np.sum(frame.response_functions, axis=0))
-        
-        # store in a list
-        patch_refl_vals = [patch_refl_vals[:,i] for i, filter_id in enumerate(frame.filter_ids)]
-        # convert the list to an NDArray
-        patch_refl_vals = np.array(patch_refl_vals)
-        # TODO check this format matches the observed value format
+                        np.matmul(frame.response_functions.T, patch_refl).T,
+                                    np.sum(frame.response_functions, axis=0)).T
+
         return patch_refl_vals
 
-    def get_observed_vals(self, 
-                          image: NDArray,
-                          show: bool=False) -> NDArray:
-        """Extract the patch values from the frame, and return the observed values
+    def find_target_outline(self, image, show: bool=False) -> bool:
+        """Automatically find the Calibration Target 
+        using the colour checker inference detection algorithm
 
-        :param frame: _description_
-        :type frame: Literal['Single';, 'RGB', 'MSC']
-        :return: An array giving the values of each patch in the image for 
-        each channel of the frame
-        :rtype: NDArray
+        :param image: The image containing the calibration target
+        :type image: NDArray
+        :return: True if the target was found, False otherwise
+        :rtype: bool
         """        
+        print("Searching for colour checker...")
+        result = detect_target(image, additional_data=True)
+        
+        # check if the run was successful
+        if result == ():
+            print("No colour checker found")
+            print("Searching for colour checker in cropped image...")
+            # if the first search fails, we try to find it again in a sub-frame
+            crop = 150
+            cropped_image = image[crop:-crop, crop:-crop]
+            result = detect_target(cropped_image, additional_data=True)
+            if result == ():
+                # # if this also fails, we return false
+                print("No calibration target found")
+                return False
+            else:
+                print(f"Found {len(result)} colour checkers")
+                # get the first one, as we only expect one
+                colour_checker_data = result[0]
+                # this gives the quadrilateral containing the calibration target
+                # we need to offset the by the image reduction of crop pixels
+                colour_checker_data.quadrilateral[:, 0] += crop
+                colour_checker_data.quadrilateral[:, 1] += crop
+                self.target_outline = colour_checker_data.quadrilateral
+        else:   
+            print(f"Found {len(result)} colour checkers")
+            # get the first one, as we only expect one
+            colour_checker_data = result[0]
+            # this gives the quadrilateral containing the calibration target
+            self.target_outline = colour_checker_data.quadrilateral
 
-        # get the approximate width and height of the calibration target in pixels
+        if show:
+            fig, ax = self.show_target_outline(image)
+
+        return True
+
+    def draw_target_outline(self, image: NDArray, show: bool=False) -> bool:
+        """Draw the target outline manually on the RGB image using
+        the roipoly library.
+
+        :param image: The image containing the calibration target
+        :type image: NDArray
+        :return: True if the target was found, False otherwise
+        :rtype: bool
+        """   
+
+        # Predraw the approximate area using OpenCV ROI select,
+        # so that we can zoom in on the target before drawing the more precise
+        # polyroi outline of the target.
+        prompt = "Select Approx. Bounding box of calibration target"
+        ct_box = cv2.selectROI(prompt, np.flip(image, 2))
+        cv2.destroyWindow(prompt)
+        # switch order of roi to (y, x, h, w)
+        ct_box = (ct_box[1], ct_box[0], ct_box[3], ct_box[2])           
+        # crop image to box
+        ct_img = image[ct_box[0]:ct_box[0]+ct_box[2], 
+                       ct_box[1]:ct_box[1]+ct_box[3]]
+
+        if len(ct_img) == 0:
+            print("No ROI selected")
+            plt.close()
+            return False
+    
+        default_backend = mpl.get_backend()
+        mpl.use('Qt5Agg')  # need this backend for RoiPoly to work 
+        fig = plt.figure(figsize=(10,10), dpi=80)
+
+        plt.imshow(ct_img, origin='upper')
+        plt.title(f'Mark precise corners of Colour Checker')
+
+        my_roi = RoiPoly(fig=fig) # draw new ROI in red color
+        plt.close()
+        mpl.use(default_backend)  # reset backend
+
+        # Get the coords for the ROIs
+        # offset the coords by the ROI location
+        quad_roi_x = [x + ct_box[1] for x in my_roi.x]
+        quad_roi_y = [y + ct_box[0] for y in my_roi.y]
+        points = np.array([quad_roi_x, quad_roi_y]).T[0:4]
+
+        if len(points) != 4:
+            print("Invalid number of points for calibration target outline.")
+            return False
+        else:            
+            self.target_outline = points
+            if show:
+                fig, ax = self.show_target_outline(image)
+            return True
+
+    def show_target_outline(self, image: NDArray):
+        """Show the target quadrilateral on the image
+
+        :param image: The image containing the calibration target
+        :type image: NDArray
+        """
+        annotated_image = image.copy()
+
+        # check the format of the image, and convert uint8 if neccesary
+        if annotated_image.dtype != np.uint8:
+            annotated_image = (annotated_image * 255).astype(np.uint8)
+
+        # Ensure points are in the correct shape and type for cv2.polylines        
+        pts = np.array(self.target_outline, dtype=np.int32).reshape((-1, 1, 2))
+        # draw the quadrilateral on the image
+        annotated_image = cv2.polylines(annotated_image, 
+                                        [pts], 
+                                        isClosed=True, 
+                                        color=(255, 0, 0), 
+                                        thickness=2)
+        # show the image
+        # make figure
+        plt.style.use('default')
+        fig, ax = plt.subplots(1,1, figsize=(4, 4))
+        ax.imshow(annotated_image)
+        plt.show()
+
+        return fig, ax
+
+    def show_target(self, image: NDArray) -> None:
+        """Show the target warped to the target outline, as analysed
+        by the colour checker patch value evaluation.
+
+        :param image: The image containing the calibration target
+        :type image: NDArray
+        """
+        if self.target_outline is None or self.target_outline.size == 0:
+            raise ValueError("Calibration target outline not set. " \
+                                "Please run find_calibration_target() first.")
+        
+        width, height, rectangle, samples = self.get_target_dimensions()
+
+        patch_data = sample_colour_checker(
+                            image, 
+                            self.target_outline, 
+                            rectangle, 
+                            samples,
+                            working_width=width,
+                            working_height=height,
+                            reference_values=None)
+        
+        # draw where the patches are on the sampled calibration target          
+        colour.plotting.plot_image(
+                colour.cctf_encoding(
+                    np.clip(patch_data.colour_checker, 0, 1)))
+
+    def get_target_dimensions(self) -> Tuple[int, int, NDArray, int]:
+        """Get the target rectangle dimensions as a rectangle of the form
+        [[x1, y1], [x2, y2], [x3, y3], [x4, y4]], and the number of pixels
+        sampled per patch.
+
+        :return: Target Rectangle and number of pixels sampled per patch
+        :rtype: Tuple[NDArray, int]
+        """        
+        # check the target has been drawn
+        if self.target_outline is None or self.target_outline.size == 0:
+            raise ValueError("Calibration target outline not set. " \
+                                "Please run find_calibration_target() first.")
+        
+        # get the approximate width and height of the calibration target        
         q = self.target_outline
         width = np.abs(q[0][0] - q[3][0]).astype(np.int32)
         height = np.abs(q[0][1] - q[1][1]).astype(np.int32)
 
-        print(f"Width: {width} Height: {height}")
-
-        samples = int(np.floor(np.sqrt(0.2*(width * height)//24)))
-
+        samples = int(np.floor(np.sqrt(0.25*(width * height)//24)))
+        print(f"Target Width: {width} Height: {height}, Samples: {samples**2}")
         rectangle = as_int32_array([
                             [0, 0],
                             [0, height],
                             [width, height],
                             [width, 0]])
+        
+        return width, height, rectangle, samples
+
+    def get_observed_colours(self, image: NDArray, show: bool=False) -> NDArray:
+        """Extract the patch colour values from the given image.
+
+        :param image: The image containing the calibration target
+        :type image: NDArray
+        :param show: Show the sampled patches on the image, defaults to False
+        :type show: bool, optional
+        :return: An array giving the values of each patch in the image for
+            each channel of the frame
+        :rtype: NDArray
+        """                
+        width, height, rectangle, samples = self.get_target_dimensions()
 
         # we use the colour detection library to sample the patches.
         # Note that we set the reference values to None, as we don't want
@@ -514,27 +742,190 @@ class CalibrationTarget:
                             working_height=height,
                             reference_values=None)
         
-        # draw where the patches are on the sampled calibration target
-        if show:
-             # Using the additional data to plot the colour checker and masks.
+        if show:             
+            # draw where the patches are on the sampled calibration target
             masks_i = np.zeros(patch_data.colour_checker.shape)
             for i, mask in enumerate(patch_data.swatch_masks):
-                masks_i[mask[0]:mask[1], mask[2]:mask[3], ...] = 1
-            
+                masks_i[mask[0]:mask[1], mask[2]:mask[3], ...] = 1            
             colour.plotting.plot_image(
                 colour.cctf_encoding(
-                    np.clip(patch_data.colour_checker + masks_i * 0.25, 0, 1)));
+                    np.clip(patch_data.colour_checker + masks_i * 0.25, 0, 1)))
 
         return patch_data.swatch_colours
-    
-    def Gauss(self, x, a, x0, sigma):
-        return a*np.exp(-(x-x0)**2/(2*sigma**2))
 
-    def get_observed_vals_stack(self,
+    def compute_ccm(self, 
+                observed_cols: NDArray,
+                reference_cols: NDArray) -> NDArray:
+        """Compute the colour correction matrix and gamma curve for the 
+        calibration target, from the given observed and reference values.
+
+        :param observed_cols: Array of observed colours for each patch
+        :type observed_cols: NDArray
+        :param reference_cols: Array of reference colours for each patch
+        :type reference_cols: NDArray
+        :return: 3x3 Colour correction matrix
+        :rtype: NDArray
+        """
+        # check the observed and reference values have the same shape
+        if observed_cols.shape != reference_cols.shape:
+            raise ValueError(f"Observed values shape {observed_cols.shape} " \
+                             f"does not match reference values shape " \
+                             f"{reference_cols.shape}")
+        if observed_cols.shape[1] != 3:
+            raise ValueError(f"Observed values must have 3 channels, " \
+                             f"got {observed_cols.shape[1]} channels")
+        if reference_cols.shape[1] != 3:
+            raise ValueError(f"Reference values must have 3 channels, " \
+                             f"got {reference_cols.shape[1]} channels")
+            
+        ccm = colour.matrix_colour_correction(observed_cols, reference_cols)
+        # apply the ccm to the reference values to get the corrected values
+        cor_vals = colour.apply_matrix_colour_correction(observed_cols, ccm)
+        # find the gamma curve                    
+        fit, covar = curve_fit(gamma_curve, 
+                                cor_vals.flatten(), 
+                                reference_cols.flatten(),
+                                p0=[1.0])
+        self.ccm = ccm
+        self.gamma = fit[0]
+
+        return ccm, fit[0]
+
+    def calibrate_colour(self, 
+                frame: Union['RGB', 'WAC_RGB', 'HRC'], 
+                from_reflectance: bool=False,
+                show: bool=False) -> NDArray:
+        """Calibrate the Colour Correction Matrix (CCM) and Gamma 
+        for the given frame.   
+
+        :param frame: The RGB frame containing the calibration target
+        :type frame: Union['RGB', 'WAC_RGB', 'HRC']
+        :param show: Show the calibration steps, defaults to False
+        :type show: bool, optional
+        :return: 3x3 colour correction matrix for the scene
+        :rtype: NDArray
+        """    
+        # check that the outline of the target has been set
+        if self.target_outline is None or self.target_outline.size == 0:
+            raise ValueError("Calibration target outline not set." \
+                "Please run find_target_outline(frame) or draw_target_outline(frame) first.")    
+        
+        if not from_reflectance:
+            drgb_image = frame.get_image('bpu') # get vals from raw image
+            obs_ct_dRGB_vals = self.get_observed_colours(drgb_image, show=show)
+            # get the reference values
+            ref_ct_sRGB_vals = self.patch_ref_sRGB
+            # compute the colour correction matrix
+            ccm, gamma = self.compute_ccm(obs_ct_dRGB_vals, ref_ct_sRGB_vals)
+            frame.ccm = ccm
+            frame.gamma = gamma
+        else:
+            # check if units are in reflectance
+            if frame.units != 'Reflectance':
+                raise ValueError(f"Frame units must be 'Reflectance' to extract CCM from reflectance values, got {frame.units}")
+            # get the observed values from the reflectance values
+            refl_image = frame.rgb_image
+            obs_ct_refl_vals = self.get_observed_colours(refl_image, show=show)
+            obs_ct_dRGB_vals = obs_ct_refl_vals
+
+            # get the reference values in sRGB
+            ref_ct_RGB_vals = self.patch_ref_sRGB
+
+            # compute the colour correction matrix to sRGB
+            ccm, gamma = self.compute_ccm(obs_ct_refl_vals, ref_ct_RGB_vals)
+            
+            # # break the CCM into Reflectance->XYZ, XYZ->sRGB
+            # ref_ct_XYZ_vals = self.patch_ref_XYZ
+            # ccm_refl2xyz, _ = self.compute_ccm(obs_ct_refl_vals, ref_ct_XYZ_vals)
+            # obs_ct_XYZ_vals = np.dot(ccm_refl2xyz, obs_ct_refl_vals.T).T
+            # ccm_xyz2sRGB, gamma_xyz2sRGB = self.compute_ccm(obs_ct_XYZ_vals, ref_ct_RGB_vals)
+            # # combine the two matrices
+            # ccm_refl2rgb = np.dot(ccm_xyz2sRGB, ccm_refl2xyz)
+            # gamma_refl2rgb = gamma_xyz2sRGB
+
+            # # compare the two matrices
+            # print(f"CCM Reflectance to XYZ to RGB: {ccm_refl2rgb}")
+            # print(f"CCM Reflectance to RGB: {ccm}")
+            # print(f"Gamma Reflectance to XYZ to RGB: {gamma_refl2rgb}")
+            # print(f"Gamma Reflectance to RGB: {gamma}")
+
+            # set the ccm and gamma on the frame
+            frame.ccm = ccm
+            frame.gamma=gamma # leave gamma as linear, as we expect the reflectance units to be linear.
+
+        if show:
+            # apply the ccm to the observed calibration target and compare
+            # to the reference values
+            # get reference values for given illuminant
+            ref_colour_checker = CCS_COLOURCHECKERS[self.colour_checker]     
+            illuminant_ccs = colour.CCS_ILLUMINANTS[
+                        "CIE 1931 2 Degree Standard Observer"][self.illuminant]
+            ref_colour_checker = colour.characterisation.ColourChecker(
+                    'Reference Patch Colours', 
+                    ref_colour_checker.data, 
+                    illuminant=illuminant_ccs,
+                    rows=ref_colour_checker.rows, 
+                    columns=ref_colour_checker.columns)
+            
+            # convert to observed sRGB to xyY and build colourchecker
+            cor_ct_sRGB_vals = np.dot(ccm, obs_ct_dRGB_vals.T).T
+
+            # cor_ct_sRGB_vals = obs_ct_sRGB_vals
+            # apply the gamma correction to the observed values
+            cor_ct_sRGB_vals = gamma_curve(cor_ct_sRGB_vals, self.gamma)
+
+            cor_ct_xyY_vals = colour.XYZ_to_xyY(
+                    colour.RGB_to_XYZ(cor_ct_sRGB_vals, 'sRGB', illuminant_ccs))
+            
+            cor_colour_checker = colour.characterisation.ColourChecker(
+                    'Recovered Patch Colours', 
+                    dict(zip(ref_colour_checker.data.keys(), cor_ct_xyY_vals)), 
+                    illuminant=illuminant_ccs,
+                    rows=ref_colour_checker.rows, 
+                    columns=ref_colour_checker.columns)
+            
+            colour.plotting.plot_multi_colour_checkers([ref_colour_checker, cor_colour_checker])   
+            
+            # draw a plot of the rgb values against one another to see the trend
+            fig, ax = plt.subplots(1, 1)            
+            cols = np.clip(self.patch_ref_sRGB, 0,1)
+            for patch in range(len(self.patch_names)):
+                ax.scatter(
+                        cor_ct_sRGB_vals[patch,0], 
+                        self.patch_ref_sRGB[patch,0], 
+                        color=cols[patch,:].flatten(),
+                        edgecolor='red'
+                        )
+                ax.scatter(
+                        cor_ct_sRGB_vals[patch,1], 
+                        self.patch_ref_sRGB[patch,1], 
+                        color=cols[patch,:].flatten(),
+                        edgecolor='green'
+                        )
+                ax.scatter(
+                        cor_ct_sRGB_vals[patch,2], 
+                        self.patch_ref_sRGB[patch,2], 
+                        color=cols[patch,:].flatten(),
+                        edgecolor='blue')
+
+            ax.plot([0, 1], [0, 1], 'k--')
+            ax.set_xlabel('Corrected sRGB')
+            ax.set_ylabel('Reference sRGB')
+            # set square axis
+            ax.set_aspect('equal', adjustable='box')
+            # set title
+            ax.set_title('Corrected vs Reference sRGB')
+            # set x and y limits
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+
+        return ccm
+
+    def get_observed_spectra(self,
                                 frame,
                                 method: Literal['mean', 'gauss-fit'],
                                 show: bool=False) -> Tuple[NDArray, NDArray]:
-        """Extract the patch values from each band of an MSC stack.
+        """Extract the patch values from each spectral band of an MSC stack.
 
         :param stack: The image stack containing the calibration target
         :type stack: NDArray
@@ -542,99 +933,111 @@ class CalibrationTarget:
         each channel of the frame
         :rtype: NDArray
         """
-        # get the approximate width and height of the calibration target in pixels
-        q = self.target_outline
-        width = np.abs(q[0][0] - q[3][0]).astype(np.int32)
-        height = np.abs(q[0][1] - q[1][1]).astype(np.int32)
-
-        print(f"Target Width: {width} Height: {height}")
-        samples = int(np.floor(np.sqrt(0.2*(width * height)//24)))
-        rectangle = as_int32_array([
-                            [0, 0],
-                            [0, height],
-                            [width, height],
-                            [width, 0]])
+        width, height, rectangle, samples = self.get_target_dimensions()
         
-        # we use the colour detection library to sample the patches.
-        # Note that we set the reference values to None, as we don't want
-        # the algorithm to check the orientation of the patches, as the
-        # frame we are using might not be an approximate of the colour checker
-        # colours. The orientation should have been determined in the
-        # find_calibration_target method.
         obs_vals = []
         obs_ave = []
         obs_std = []
         for band in frame.imgs:
             cwl = band.cwl
-            # TODO replace this with a method that gives control of the sampling
-            # e.g. perform statistics on the ROI of each patch.
-            patch_data = sample_colour_checker(
-                            band.image, 
-                            self.target_outline, 
-                            rectangle, 
-                            samples,
-                            working_width=width,
-                            working_height=height,
-                            reference_values=None)
+
+            # we use the colour detection library to sample the patches.
+            # Note that we set the reference values to None, as we don't want
+            # the algorithm to check the orientation of the patches, as the
+            # frame we are using might not be an approximate of the colour
+            # checker colours. The orientation should have been determined in
+            # the find_calibration_target method.
+            
+            patch_data = sample_colour_checker(band.image,
+                                            self.target_outline,
+                                            rectangle,
+                                            samples,
+                                            working_width=width,
+                                            working_height=height,
+                                            reference_values=None)
             
             obs_vals.append(patch_data.swatch_colours)
-
+            col_check_img = patch_data.colour_checker
             swatch_ave = []
             swatch_std = []
+
+            # draw where the patches are on the sampled calibration target
             if show:
-                fig, ax = plt.subplots(self.rows, self.cols, sharey=True, figsize=(self.cols, self.rows))
+                # Using the additional data to plot the colour checker and masks
+                masks_i = np.zeros(col_check_img.shape)
+                for i, mask in enumerate(patch_data.swatch_masks):
+                    masks_i[mask[0]:mask[1], mask[2]:mask[3], ...] = 1
+                
+                # normalise the colour checker image
+                col_check_disp_img = col_check_img/col_check_img.max()
+
+                # plot the colour checker image with the masks
+                colour.plotting.plot_image(
+                    colour.cctf_encoding(
+                        np.clip(col_check_disp_img + masks_i * 0.25, 0, 1)),
+                                    title=f"{band.filter_id} {cwl} nm Sampling")
+
+            # create a figure to plot the pixel values and fits of each patch
+            if show:
+                plt.style.use('dark_background')
+                fig, ax = plt.subplots(self.rows, self.cols, sharey=True, 
+                                                figsize=(self.cols, self.rows))            
+            # compute the observed value for each patch
             for p, mask in enumerate(patch_data.swatch_masks):
-                # get the pixel values covered by the mask in the patch+data.colour_checker
-                # range of colour checker
-                ct_max = patch_data.colour_checker.max()
-                patch = patch_data.colour_checker[mask[0]:mask[1], mask[2]:mask[3], ...]
-                # implement diferent methods for evaluating the patch value
+                # get the pixel values covered by the patch mask
+                patch = col_check_img[mask[0]:mask[1], mask[2]:mask[3], ...]
+
+                # get the mean and standard deviation of the patch
                 ave = np.mean(patch, axis=(0,1))
                 std = np.std(patch, axis=(0,1))
+
+                # TODO if the standard deviation is 0, implies an overexposed 
+                # patch, so remove it from the analysis
+
+                # 2 methods for computing the observed values
+                #   A. mean of the patch
+                #   B. Gaussian fit to the patch histogram 
+                #        - good for discarding marks/scratches/dust on the patch
                 if method == 'mean':
+                    # use mean and standard deviation of th patch values
                     swatch_ave.append(ave)
                     swatch_std.append(std)
-                
-                if method == 'gauss-fit':
-                    ydata, xdata = np.histogram(
-                                                patch, 
-                                                bins=patch.size//2, 
-                                                range=(ave-4*std, ave+4*std)
-                                                )
+
+                elif method == 'gauss-fit':
+                    # get the histogram of the patch pixel values
+                    ydata, xdata = np.histogram(patch,
+                                                bins=patch.size//2,
+                                                range=(ave-4*std, ave+4*std))
                     
-                    parameters, covariance = scipy.optimize.curve_fit(
-                                                    self.Gauss, 
-                                                    xdata[:-1],
-                                                    ydata,
-                                                    [10, ave, std]
-                                                    )
+                    # fit Gaussian to the histogram
+                    params, *_ = curve_fit(gauss,
+                                          xdata[:-1],
+                                          ydata,
+                                          [10, ave, std])
+                    fit_amp, fit_ave, fit_std = params
 
-                    fit_A = parameters[0]
-                    fit_B = parameters[1]
-                    fit_C = parameters[2]
+                    swatch_ave.append(fit_ave)
+                    swatch_std.append(fit_std)
 
-                    swatch_ave.append(fit_B)
-                    swatch_std.append(fit_C)
-
-                    if show:
-                        fit_y = self.Gauss(xdata[:-1], fit_A, fit_B, fit_C)
-                        r = p // len(patch) # current column                    
-                        c = p % len(patch) # current row
-                        col = colour.cctf_encoding(np.clip(self.patch_ref_sRGB[p], 0,1))
-                        # alpha=1.0
-                        alpha = (fit_B / ct_max)**2
-                        ax[r][c].plot(xdata[:-1], ydata, 'o', c=col,label='data', alpha=alpha)
-                        ax[r][c].plot(xdata[:-1], fit_y, '-', c=col, label='fit', alpha=alpha)
-                        # remove axis ticks
+                    # show the histogram and fit for each patch
+                    if show:                        
+                        fit_y = gauss(xdata[:-1],fit_amp,fit_ave,fit_std)
+                        r = p // self.cols # current column                    
+                        c = p % self.cols # current row
+                        col = colour.cctf_encoding(
+                                        np.clip(self.patch_ref_sRGB[p], 0,1))
+                        alp = (fit_ave / col_check_img.max())**2
+                        ax[r][c].plot(xdata[:-1], ydata, 'o', c=col,alpha=alp)
+                        ax[r][c].plot(xdata[:-1], fit_y, '-', c=col,alpha=alp)
                         ax[r][c].set_axis_off()
-                        # show mean
-                        ax[r][c].axvline(fit_B, ls='--')
+                        ax[r][c].axvline(fit_ave, ls='--')
                         ax[r][c].axvline(ave, ls='-.')
-                        ax[r][c].set_title(f"{self.patch_names[p]}", c=col, fontsize='x-small')
+                        ax[r][c].set_title(f"{self.patch_names[p]}", c=col, 
+                                                            fontsize='x-small')
 
             if show:
                 fig.suptitle(f"{band.filter_id} {cwl} nm Gauss-Fits")
-                fig.tight_layout()
+                fig.tight_layout()                
 
             obs_ave.append(np.array(swatch_ave))
             obs_std.append(np.array(swatch_std))
@@ -649,9 +1052,9 @@ class CalibrationTarget:
                             frame,
                             method: Literal['mean', 'gauss-fit'] = 'gauss-fit',
                             show: bool=False) -> None:
-        """Calibrate the reflectance values of the patches in each band
-        of the frame, setting the reflectance correction coefficients
-        for each band of the frame.
+        """Calibrate the given frame to the values of the colour checker patches 
+        in each band of the frame, setting the reflectance correction 
+        coefficients for each band.
 
         :param frame: The MSC frame to calibrate the reflectance values for
         :type frame: MSC
@@ -659,26 +1062,37 @@ class CalibrationTarget:
         :type show: bool, optional
         """        
 
-        # get the observed values for each band of the frame        
-        obs_ave, obs_std = self.get_observed_vals_stack(frame, method, show)
-        # get the reference values for each band of the frame
-        ref_refl = self.sample_patch_ref_refl(frame)
-        # compute the reflectance correction coefficients for each band of the frame
-        refl_coeffs = []
-        refl_offsets = []
+        # check frame units
+        if frame.units == 'Reflectance':
+            print("Frame already in reflectance, skipping calibration")
+            return
 
+        # get the observed spectra
+        # TODO propagate uncertainties
+        obs_ave, obs_std = self.get_observed_spectra(frame, method, show)
+        # get the reference spectra
+        ref_refl = self.sample_patch_spectra(frame)
+
+        # prepare plot of the observed vs reference values fit for each band
         if show:
             ncols=3
             nrows=frame.n_bands//ncols
-            fig, ax = plt.subplots(nrows=nrows, ncols=ncols,sharey=True, figsize=(2*3, 2*frame.n_bands//3))            
+            plt.style.use('default')
+            fig, ax = plt.subplots(nrows=nrows, ncols=ncols,sharey=True,
+                                            figsize=(2*3, 2*frame.n_bands//3))
+        
+        # compute the reflectance coefficients for each band of the frame
+        refl_coeffs = []
+        refl_offsets = []
         for b, band in enumerate(frame.imgs):
             x = obs_ave[b,:]
             y = ref_refl[b,:]
             result = linregress(x, y)
-            # store the slope and intercept of the regression line
             refl_coeffs.append(result.slope)
             refl_offsets.append(result.intercept)
             # TODO propagate uncertainties of the regression line
+
+            # draw observed vs reference values fit for this band
             if show:                
                 c = b % ncols # corrent column
                 r = b // ncols # current row
@@ -689,284 +1103,53 @@ class CalibrationTarget:
                 col = colour.cctf_encoding(np.clip(self.patch_ref_sRGB, 0,1))
                 this_ax.scatter(x, y, c=col)
                 this_ax.plot(x, result.intercept + result.slope*x, 'r')
-                # set x label to obs band
                 this_ax.set_xlabel(f'Power {frame.units}')
-                # set y label to ref band
-                this_ax.set_ylabel(f'Reflectance')                
-
+                this_ax.set_ylabel(f'Reflectance')
                 this_ax.set_title(f'{band.filter_id} {band.cwl} nm')
-                # # remove ticks
-                # this_ax.set_xticklabels([])
-                # this_ax.set_yticklabels([])
+
         if show:
             fig.suptitle(f'Reflectance Calibration for {frame.camera} {frame.sol} {frame.scene} {frame.trial}')
             fig.tight_layout()
 
-        # set the reflectance correction coefficients and offsets for each band of the frame
+        # set the reflectance coefficients for each band of the frame
         for b, band in enumerate(frame.imgs):
             band.refl_coeff = refl_coeffs[b]
             band.refl_offset = refl_offsets[b]
             print(f"{band.filter_id} {band.cwl} nm: coeff={refl_coeffs[b]:0.3}1/DN/s, offset={refl_offsets[b]:0.3}")
-
-    def compute_ccm(self, 
-                    observed_vals: NDArray,
-                    reference_vals: NDArray) -> NDArray:
-        """Compute the colour correction matrix for the calibration target,
-        from the given observed and reference values.
-
-        :param observed_vals: Array of observed values for each patch
-        :type observed_vals: NDArray
-        :param reference_vals: Array of reference values for each patch
-        :type reference_vals: NDArray
-        :return: 3x3 Colour correction matrix
-        :rtype: NDArray
-        """     
-        # TODO make checks on the observed and reference values arrays
-        ccm = colour.matrix_colour_correction(observed_vals, reference_vals)
-        self.ccm = ccm
-        return ccm
-
-    def find_target_outline(self, rgb_image) -> bool:
-        """Automatically find the Calibration Target 
-        using the colour checker detection algorithm
-
-        :param image: The image containing the calibration target
-        :type image: NDArray
-        :return: True if the target was found, False otherwise
-        :rtype: bool
-        """
-        # run the colour checker detection algorithm
-        # decoded_image = colour.cctf_decoding(rgb_image)
-        decoded_image = rgb_image
-
-        # this algorithm finds the colour checker values of the image supplied.
-        # We want to get the patch locations though, so that we can draw
-        # them on other images - e.g. we find the patch locations in an RGB
-        # image, and then draw them on the multispectral image.
-        print("Searching for colour checker...")
-        colour_checker_data = detect_colour_checkers_inference(
-                                    decoded_image, 
-                                    additional_data=True)
-        
-        # check if the run was successful
-        if colour_checker_data == ():
-            print("No colour checker found")
-            print("Searching for colour checker in cropped image...")
-            # if the first search fails, we try to find it again in a smaller subset of the image
-            cropped_image = decoded_image[150:-150, 150:-150]
-            colour_checker_data = detect_colour_checkers_inference(
-                                    cropped_image, 
-                                    additional_data=True)
-            if colour_checker_data == ():
-                # # if this also fails, we resort to drawing the colour checker manually
-                # print('Manually draw out the calibration target quadrilateral')
-                # result = self.draw_target_outline(rgb_image)
-                # if result is False:
-                print("No calibration target found")
-                return False
-            else:
-                print(f"Found {len(colour_checker_data)} colour checkers")
-                # get the first one, as we only expect one
-                colour_checker_data = colour_checker_data[0]
-                # from this we get the quadrilateral that contains the calibration target
-                # we need to offset the by the image reduction of 150 pixels
-                colour_checker_data.quadrilateral[:, 0] += 150
-                colour_checker_data.quadrilateral[:, 1] += 150
-                self.target_outline = colour_checker_data.quadrilateral
-        else:   
-            print(f"Found {len(colour_checker_data)} colour checkers")
-            # get the first one, as we only expect one
-            colour_checker_data = colour_checker_data[0]
-            # from this we get the quadrilateral that contains the calibration target
-            self.target_outline = colour_checker_data.quadrilateral
-        
-        # this is all the information we need to extract the patch values down the line, if we repurpose the code provided
-        # in the colour checker detection library
-
-        return True
-
-    def draw_target_outline(self, image: NDArray) -> bool:
-        """Draw the target outline manually on the RGB image using
-        the roipoly library.
-        :param image: The image containing the calibration target
-        :type image: NDArray
-        :return: True if the target was found, False otherwise
-        :rtype: bool
-        """   
-
-        # TODO predraw the approximate area using OpenCV ROI select,
-        # so that we can zoom in on the target before drawing the more precise
-        # polyroi outline of the target.
-
-        ct_roi = cv2.selectROI("Select Calibration Target ROI", np.flip(image, 2))
-        cv2.destroyWindow("Select Calibration Target ROI")
-    
-        default_backend = mpl.get_backend()
-        mpl.use('Qt5Agg')  # need this backend for RoiPoly to work 
-        
-        fig = plt.figure(figsize=(10,10), dpi=80)
-
-        # switch order of roi to (y, x, h, w)
-        ct_roi = (ct_roi[1], ct_roi[0], ct_roi[3], ct_roi[2])           
-        
-        ct_img = image[ct_roi[0]:ct_roi[0]+ct_roi[2], ct_roi[1]:ct_roi[1]+ct_roi[3]]
-
-        if len(ct_img) == 0:
-            print("No ROI selected")
-            plt.close()
-            mpl.use(default_backend)  # reset backend
-            return False     
-
-        plt.imshow(ct_img, origin='upper')
-        plt.title(f'Draw quadrilateral around the calibration target')
-
-        my_roi = RoiPoly(fig=fig) # draw new ROI in red color
-        plt.close()
-        mpl.use(default_backend)  # reset backend
-
-        # Get the coords for the ROIs
-        # offset the coords by the ROI location
-        quad_roi_x = [x + ct_roi[1] for x in my_roi.x]
-        quad_roi_y = [y + ct_roi[0] for y in my_roi.y]
-        points = np.array([quad_roi_x, quad_roi_y]).T[0:4]
-
-        if len(points) != 4:
-            return False
-        else:            
-            self.target_outline = points
-            return True
-
-    def show_target_outline(self, image: NDArray):
-        """Show the target quadrilateral on the image
-
-        :param image: The image containing the calibration target
-        :type image: NDArray
-        """
-        # draw the quadrilateral on the image
-        annotated_image = image.copy()
-        points = np.int32(self.target_outline)
-
-        # check the format of the image, and convert uint8 if neccesary
-        if annotated_image.dtype != np.uint8:
-            annotated_image = (annotated_image * 255).astype(np.uint8)
-
-        annotated_image = cv2.polylines(annotated_image, 
-                                        [points], 
-                                        isClosed=True, 
-                                        color=(255, 0, 0), 
-                                        thickness=2)
-        # show the image
-        plt.imshow(annotated_image)
-        plt.show()
-
-    def extract_ccm(self, frame, show: bool=False):
-        drgb_image = frame.get_image('bpu') # get vals from raw image
-        obs_ct_dRGB_vals = self.get_observed_vals(drgb_image, show=show)
-        # get the reference values
-        ref_ct_sRGB_vals = self.patch_ref_sRGB
-        # compute the colour correction matrix
-        ccm = self.compute_ccm(obs_ct_dRGB_vals, ref_ct_sRGB_vals)
-        frame.ccm = ccm
-
-        if show:
-            # apply the ccm to the observed calibration target and compare
-            # to the reference values
-            # get reference values for given illuminant
-            ref_colour_checker = CCS_COLOURCHECKERS[self.colour_checker]     
-            illuminant_ccs = colour.CCS_ILLUMINANTS[
-                        "CIE 1931 2 Degree Standard Observer"][self.illuminant]
-            ref_colour_checker = colour.characterisation.ColourChecker(
-                                        'Reference Patch Colours', 
-                                        ref_colour_checker.data, 
-                                        illuminant=illuminant_ccs,
-                                        rows=ref_colour_checker.rows, 
-                                        columns=ref_colour_checker.columns)
             
-            # convert to observed sRGB to xyY and build colourchecker
-            cor_ct_sRGB_vals = np.dot(ccm, obs_ct_dRGB_vals.T).T
-            cor_ct_xyY_vals = colour.XYZ_to_xyY(
-                    colour.RGB_to_XYZ(cor_ct_sRGB_vals, 'sRGB', illuminant_ccs))
-            cor_colour_checker = colour.characterisation.ColourChecker(
-                    'Recovered Patch Colours', 
-                    dict(zip(ref_colour_checker.data.keys(), cor_ct_xyY_vals)), 
-                    illuminant=illuminant_ccs,
-                    rows=ref_colour_checker.rows, 
-                    columns=ref_colour_checker.columns)
-            
-            colour.plotting.plot_multi_colour_checkers([ref_colour_checker, cor_colour_checker])   
-
-            # draw a plot of the rgb values against one another to see the trend
-            fig, ax = plt.subplots(1, 1)            
-            cols = np.clip(self.patch_ref_sRGB, 0,1)
-            for patch in range(len(self.patch_names)):
-                ax.scatter(
-                        self.patch_ref_sRGB[patch,0], 
-                        cor_ct_sRGB_vals[patch,0], 
-                        color=cols[patch,:].flatten(),
-                        edgecolor='red'
-                        )
-                ax.scatter(
-                        self.patch_ref_sRGB[patch,1], 
-                        cor_ct_sRGB_vals[patch,1], 
-                        color=cols[patch,:].flatten(),
-                        edgecolor='green'
-                        )
-                ax.scatter(
-                        self.patch_ref_sRGB[patch,2], 
-                        cor_ct_sRGB_vals[patch,2], 
-                        color=cols[patch,:].flatten(),
-                        edgecolor='blue')
-
-            ax.plot([0, 1], [0, 1], 'k--')
-            ax.set_xlabel('Reference sRGB')
-            ax.set_ylabel('Corrected sRGB')
-            # set square axis
-            ax.set_aspect('equal', adjustable='box')
-            # set title
-            ax.set_title('Corrected vs Reference sRGB')
-            # set x and y limits
-            ax.set_xlim(0, 1)
-            ax.set_ylim(0, 1)
-
-        return ccm
-
-    def find_target_and_compute_ccm(self, 
-                    frame, 
-                    method: Literal['auto', 'manual']='auto',
-                    show: bool=False) -> NDArray:
-        """Find the calibration target in the given frame, and compute the
-        colour correction matrix from the observed values and reference values.
-
-        :param frame: The image containing the calibration target
-        :type frame: RGB
-        :return: 3x3 Colour correction matrix
-        :rtype: NDArray
-        """
-        # find the calibration target in the image
-        approx_balance_rgb = frame.get_image('99b')
-        if method == 'manual':
-            # draw the target outline manually
-            result = self.draw_target_outline(approx_balance_rgb)
-        elif method == 'auto':
-            result = self.find_target_outline(approx_balance_rgb)
-        else:
-            raise ValueError(f"Unknown method {method} for finding calibration target")
-
-        if result is False:
-            print("No calibration target found")
-            return False
-            # print("Please draw the calibration target outline manually")
-            # result = self.draw_target_outline(approx_balance_rgb)
-
+        # plot the spectral reflectance values for each band against the reference spectra
         if show:
-            self.show_target_outline(approx_balance_rgb)
-
-        ccm = self.extract_ccm(frame, show=show)
-  
-        return True
-
-    def save_rois(self):
-        pass
+            plt.style.use('dark_background')
+            fig, ax = plt.subplots(self.rows, self.cols, sharex=True, 
+                                sharey=True, figsize=(2*self.cols, 2*self.rows))
+            for p, patch_name in enumerate(self.patch_names):                
+                # get the observed values for this patch
+                cwls = frame.cwls # wavelengths of the frame                
+                obs_vals = obs_ave[:, p]
+                # scale the observed values to reflectance
+                fit_spec = obs_vals*refl_coeffs + refl_offsets
+                ref_spec = ref_refl[:, p]
+                col = colour.cctf_encoding(np.clip(self.patch_ref_sRGB[p], 0,1))
+                plt.style.use('dark_background')
+                # draw the observed vs reference values fit for this patch
+                r = p // self.cols # current row
+                c = p % self.cols # current column                
+                if self.rows == 1:
+                    this_ax = ax[c]
+                else:
+                    this_ax = ax[r][c]
+                this_ax.plot(cwls,ref_spec,c=col,ls='--',label='Ref.',marker='x')
+                this_ax.plot(cwls,fit_spec,c=col,ls='-',label='Fit',marker='o')
+                # TODO add propogation of uncertainties to errorbars
+                this_ax.set_ylim(0, 1)
+                this_ax.set_title(f"{patch_name.title()}", c=col,
+                                                            fontsize='x-small')
+                this_ax.legend(fontsize='x-small')
+                # set title of legend
+            fig.supxlabel('Wavelength (nm)')
+            fig.supylabel('Reflectance')
+            fig.suptitle(f'Reflectance Calibration Patch Fits for {frame.camera} {frame.sol} {frame.scene} {frame.trial}')
+            fig.tight_layout()
 
 class Img:
     def __init__(self, 
@@ -1063,6 +1246,7 @@ class Img:
         response = self.filter_response['response']
         
         if ax is None:
+            plt.style.use('default')
             fig, ax = plt.subplots()
         ax.plot(wavelengths, response, label=self.filter_id)
         ax.set_xlabel('Wavelength (nm)')
@@ -1236,7 +1420,7 @@ class Img:
         :return: stretched image
         :rtype: np.ndarray
         """
-        print(f"Stretching image using {LEVEL_DICT[stretch_method]}")
+        print(f"Stretching image using {STRETCH_DICT[stretch_method]}")
         if self.stretch[stretch_method]['factor'] is None:
             self.extract_stretch_coefficient(stretch_method)
         print(f'Applying stretch factor of {self.stretch[stretch_method]["factor"]}')
@@ -1295,7 +1479,8 @@ class Img:
         title = f"{self.sol} {self.scene} {self.trial} {self.channel} {self.filter_id} {self.cwl}±{int(self.fwhm/2)} nm ({stretch_method})"
 
         disp_img = self.get_image(stretch_method) # image is always in range of 0 - 1
-
+        
+        plt.style.use('default')
         fig, ax = plt.subplots(1,2, figsize=(8, 4))
         disp = ax[0].imshow(disp_img, vmin=0.0, vmax=1.0, cmap='viridis')
         # add colorbar
@@ -1370,6 +1555,7 @@ class RGB:
         self.rgb_image = np.stack([self.red.image, self.green.image, self.blue.image], axis=2)
         self.exposures = np.array([self.red.exposure, self.green.exposure, self.blue.exposure])
         self.ccm = np.empty((3,3))
+        self.gamma = 1.0
         self.balance_vector = {
             'raw': np.zeros(3),
             'bpu': np.zeros(3),
@@ -1466,6 +1652,7 @@ class RGB:
         if not Path(ccm_dir, filename).exists():
             raise FileNotFoundError(f"CCM file {filename} does not exist in {ccm_dir}")
         ccm_df = pd.read_csv(Path(ccm_dir, filename), header=None)
+        # read the gamma value from this
         self.ccm = ccm_df.to_numpy()
         print(f"CCM loaded from {ccm_dir}/ccm.csv")
 
@@ -1477,24 +1664,27 @@ class RGB:
         # add the camera, sol, scene, trial to the filename
         # TODO figure if there is any other metadata we can apply - e.g. in shade, in sun, indoors etc.
         filename = f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_ccm.csv"
+        # add gamma to a line in the csv
+
         ccm_df.to_csv(Path(self.out_dir, filename), index=False, header=False)
         print(f"CCM saved to {self.out_dir}/{filename}")
 
     def apply_ccm(self):
         """Apply the colour correction matrix to the RGB image
         """
-        drgb_image  = self.get_image('bpu')
+        # if image is in relfectance units, get image,
+        if self.units == 'Reflectance':
+            drgb_image = self.rgb_image.copy()
+        else:
+            drgb_image  = self.get_image('bpu')
         # check if the ccm is set
         if self.ccm is None:
             print("No colour correction matrix set")
             # search for the latest calibration target in the 
         srgb_image = colour.apply_matrix_colour_correction(drgb_image, self.ccm)
-
-        # check if the iamge range is 0 - 1.
-        # # apply 0 - 1 normalisation and clipping
-        # srgb_image = srgb_image.astype(np.float64) / np.max(srgb_image)
-        # apply encoding
-        # srgb_image = colour.cctf_encoding(srgb_image)
+        # apply the gamma correction
+        srgb_image = np.clip(srgb_image, 0.0, None) # clamp negative vals to 0
+        srgb_image = gamma_curve(srgb_image, self.gamma)
         srgb_image = np.clip(srgb_image, 0.0, 1.0)
 
         return srgb_image
@@ -1611,7 +1801,7 @@ class RGB:
 
     def apply_balance_vector(self, colour_correction: Literal['raw', 'bpb', 'bps', 'wps', '99p']='raw'):
 
-        print(f"Stretching image using {LEVEL_DICT[colour_correction]}")
+        print(f"Stretching image using {STRETCH_DICT[colour_correction]}")
         if (self.balance_vector[colour_correction] == np.zeros(3)).all():
             self.extract_balance_vector(colour_correction)
         r_disp_img = np.clip(self.red.image * self.balance_vector[colour_correction][0], 0.0, 1.0)        
@@ -1653,6 +1843,7 @@ class RGB:
         # # apply encoding
         # disp_img = colour.cctf_encoding(disp_img)
 
+        plt.style.use('default')
         fig, ax = plt.subplots(1,2, figsize=(8, 4))  
         
         disp = ax[0].imshow(disp_img, vmin=0, vmax=1.0) # what constraints should be applied here???
@@ -1681,7 +1872,7 @@ class RGB:
         
         title = f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_RGB_{colour_correction}.png"
 
-        print(f"Exporting image using {LEVEL_DICT[colour_correction]}")
+        print(f"Exporting image using {STRETCH_DICT[colour_correction]}")
         if colour_correction == 'ccm':
             # apply the colour correction matrix
             disp_img = self.get_image('ccm')
@@ -1720,6 +1911,7 @@ class RGB:
 
         if show:        
             # show the image at full resolution
+            plt.style.use('default')
             fig, ax = plt.subplots(1,1, figsize=(8, 4))  
             ax.imshow(disp_img, vmin=0, vmax=255, interpolation='none')
             ax.axis('off')
@@ -1803,7 +1995,7 @@ class HRC(RGB):
         else:
             raise ValueError(f"Unknown method: {method}")             
         drgb_image = self.get_image('bpu') # get vals from raw image
-        hrc_ct_drgb = hrc_cal_targ.get_observed_vals(drgb_image)
+        hrc_ct_drgb = hrc_cal_targ.get_observed_colours(drgb_image)
 
         # get the hrc drgb -> srgb ccm
         hrc_ct_ref_srgb = hrc_cal_targ.patch_ref_sRGB
@@ -1820,7 +2012,7 @@ class HRC(RGB):
             raise ValueError(f"Unknown method: {method}")
         # get the observed values from the calibration target
         wac_dRGB = wac_frame.get_image('bpu')
-        wac_ct_drgb = wac_cal_targ.get_observed_vals(wac_dRGB)
+        wac_ct_drgb = wac_cal_targ.get_observed_colours(wac_dRGB)
 
         # compute the CCM from the HRC to RWAC patch values
         hrc2wac_ccm = wac_cal_targ.compute_ccm(hrc_ct_drgb, wac_ct_drgb)
@@ -1919,6 +2111,7 @@ class MSC:
     def plot_exposures(self):
         """Plot the exposures as a function of wavelength
         """    
+        plt.style.use('default')
         fig, ax = plt.subplots(1,1, figsize=(8, 4))    
 
         ax.plot(
@@ -1955,6 +2148,7 @@ class MSC:
     def plot_filter_responses(self):
         """Plot the response functions as a function of wavelength
         """    
+        plt.style.use('default')
         fig, ax = plt.subplots(1,1, figsize=(8, 4))    
 
         for i, band in enumerate(self.filter_ids):
@@ -2084,7 +2278,6 @@ class MSC:
             }
         )
 
-
 class StereoTools:
     """A class for stereo tools, such as camera calibration and stereo rectification.
     """
@@ -2115,7 +2308,33 @@ class StereoTools:
         if isinstance(self.dst, RGB) or isinstance(self.dst, HRC) or isinstance(self.dst, WAC_RGB):
             self.dst = cv2.cvtColor(dst_img_uint, cv2.COLOR_RGBA2BGR)
         else:
-            self.dst = dst_img_uint            
+            self.dst = dst_img_uint 
+
+    def select_match_regions(self) -> None:
+        """Select matching regions in the source and destination images.
+        This is a placeholder for manual selection of matching regions.
+        """               
+        if not isinstance(self.src, np.ndarray):
+            self.cvtFrame2cv2() 
+
+        prompt = "Select Src. Region for Optimal Rectification"
+        src_box = cv2.selectROI(prompt, self.src)
+        cv2.destroyWindow(prompt)
+
+        # set pixels outside of box to NaN
+        src_mask = np.zeros(self.src.shape[:2], dtype=np.uint8)
+        src_mask[src_box[1]:src_box[1]+src_box[3], src_box[0]:src_box[0]+src_box[2]] = 255
+        self.src = cv2.bitwise_and(self.src, self.src, mask=src_mask)
+
+        prompt = "Select same Region in Dst."
+        dst_box = cv2.selectROI(prompt, self.dst)
+        cv2.destroyWindow(prompt)
+
+        # set pixels outside of box to NaN
+        dst_mask = np.zeros(self.dst.shape[:2], dtype=np.uint8)
+        dst_mask[dst_box[1]:dst_box[1]+dst_box[3], dst_box[0]:dst_box[0]+dst_box[2]] = 255
+        self.dst = cv2.bitwise_and(self.dst, self.dst, mask=dst_mask)
+      
 
     def findMatches(self, show: bool=False) -> None:
         """Find matches between the source and destination images using SIFT.
@@ -2282,6 +2501,8 @@ class StereoTools:
                 wrp_frame.refl_offset[wrp_band_idx] = dst_frame.imgs[i].refl_offset
             
             wrp_frame.camera = 'LRWAC'
+            wrp_frame.units = wrp_frame.imgs[0].units
+            wrp_frame.dtype = wrp_frame.imgs[0].dtype
                 
         return wrp_frame
 
