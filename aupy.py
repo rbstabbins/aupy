@@ -18,7 +18,8 @@ from scipy.stats import linregress
 from scipy.optimize import curve_fit
 from scipy.interpolate import interp1d
 from spectral import envi
-import PIL.Image
+from PIL import Image
+from PIL import ImageDraw, ImageFont
 
 import colour
 from colour.characterisation import CCS_COLOURCHECKERS
@@ -200,10 +201,12 @@ class AupeInfo:
                 filter_ids = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06',
                               'G07', 'G08', 'G09', 'G10', 'G11', 'G12']
                 
-        # 'virtual' camera - holds RWAC->warped-2-HRC images
-        elif camera == 'RWHRC':
+        # 'virtual' camera - holds LRWAC->warped-2-HRC images
+        elif camera == 'LRWHRC':
             if frame_type == 'MSC':
-                filter_ids = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06',
+                filter_ids = [
+                            'H1R', 'H2G', 'H3B',
+                            'G01', 'G02', 'G03', 'G04', 'G05', 'G06',
                               'G07', 'G08', 'G09', 'G10', 'G11', 'G12']
                 
         else:
@@ -330,10 +333,11 @@ class AupeIO:
         
         elif self.frame_type == 'RGB':
             if self.camera == 'HRC':
-                frame = HRC((input_file_dicts[0],
-                             input_file_dicts[1],
-                             input_file_dicts[2]), 
-                             self.aupe_info)
+                frame = HRC.from_filedicts((input_file_dicts[0],
+                                            input_file_dicts[1],
+                                            input_file_dicts[2]), 
+                                            self.aupe_info)
+                frame.debayer()
                 return frame
             elif self.camera == 'LWAC' or self.camera == 'RWAC':
                 frame = WAC_RGB.from_filedicts((input_file_dicts[0],
@@ -343,7 +347,16 @@ class AupeIO:
                 return frame
         
         elif self.frame_type == 'MSC':
-            frame = MSC(input_file_dicts, self.aupe_info)
+            if self.camera == 'LWAC' or self.camera == 'RWAC' or self.camera == 'LRWAC' or self.camera == 'LRWHRC':
+                # create a WAC MSC frame                
+                frame = MSC.from_filedicts(input_file_dicts, self.aupe_info)
+                return frame
+            elif self.camera == 'HRC':
+                frame = HRC.from_filedicts((input_file_dicts[0],
+                                            input_file_dicts[1],
+                                            input_file_dicts[2]), 
+                                            self.aupe_info)
+                frame = frame.debayer(to_msc=True)                
             return frame
         
         else:
@@ -792,8 +805,7 @@ class CalibrationTarget:
         return ccm, fit[0]
 
     def calibrate_colour(self, 
-                frame: Union['RGB', 'WAC_RGB', 'HRC'], 
-                from_reflectance: bool=False,
+                frame: Union['RGB', 'WAC_RGB', 'HRC'],                 
                 show: bool=False) -> NDArray:
         """Calibrate the Colour Correction Matrix (CCM) and Gamma 
         for the given frame.   
@@ -810,7 +822,7 @@ class CalibrationTarget:
             raise ValueError("Calibration target outline not set." \
                 "Please run find_target_outline(frame) or draw_target_outline(frame) first.")    
         
-        if not from_reflectance:
+        if frame.units != 'Reflectance':
             drgb_image = frame.get_image('bpu') # get vals from raw image
             obs_ct_dRGB_vals = self.get_observed_colours(drgb_image, show=show)
             # get the reference values
@@ -820,9 +832,6 @@ class CalibrationTarget:
             frame.ccm = ccm
             frame.gamma = gamma
         else:
-            # check if units are in reflectance
-            if frame.units != 'Reflectance':
-                raise ValueError(f"Frame units must be 'Reflectance' to extract CCM from reflectance values, got {frame.units}")
             # get the observed values from the reflectance values
             refl_image = frame.rgb_image
             obs_ct_refl_vals = self.get_observed_colours(refl_image, show=show)
@@ -1162,13 +1171,14 @@ class Img:
         self.scene = file_dict['scene']
         self.sol = file_dict['sol']
         self.trial = file_dict['trial']
+        self.tag = None  # tag for the image, reserved for warping to describe feature that rectification is optimised for
         
         self.out_dir = file_dict['out_dir']
 
         self.channel = self.filename.split('_')[3]
         # from metadata
         # read the metadata from the image file using the PIL exif reader
-        img = PIL.Image.open(self.filepath)
+        img = Image.open(self.filepath)
         metadata = img.info
 
         self.pan = float(metadata['AU_pan'])
@@ -1230,7 +1240,9 @@ class Img:
         response_file = Path(repsonse_path, self.camera,
                                 f"{self.filter_id}.csv")
         if not response_file.exists():
-            raise FileNotFoundError(f"Filter response file {response_file} does not exist")
+            # e.g. if loading HRC, then filter responses need to be loaded after debayering
+            print(f"Filter response file {response_file} does not exist")
+            return None
         # read the csv file into a pandas dataframe
         filter_df = pd.read_csv(response_file, index_col=0)
         # convert the dataframe to a dictionary of the index and values
@@ -1510,7 +1522,10 @@ class Img:
         :type stretch_method: Literal['raw', 'bps', 'wps'], optional
         """   
         
-        title = f"{self.sol}_{self.scene}_{self.trial}_{self.channel}_{self.cwl}_{int(self.fwhm)}_nm_{stretch_method}.png"
+        if self.tag is not None:
+            title = f"{self.sol}_{self.scene}_{self.trial}_{self.channel}_{self.tag}_{int(self.fwhm)}_nm_{stretch_method}_{self.tag}.png"
+        else:
+            title = f"{self.sol}_{self.scene}_{self.trial}_{self.channel}_{self.cwl}_{int(self.fwhm)}_nm_{stretch_method}.png"
 
         disp_img = self.get_image(stretch_method)
 
@@ -1565,6 +1580,7 @@ class RGB:
             'wps': np.zeros(3),
         }        
         self.camera = self.red.camera
+        self.tag = None  # tag for the image, reserved for warping to describe feature that rectification is optimised for
         self.trial = self.red.trial
         self.scene = self.red.scene
         self.sol = self.red.sol
@@ -1593,6 +1609,7 @@ class RGB:
         red_img = Img(file_dicts[0], aupe_info)
         green_img = Img(file_dicts[1], aupe_info)
         blue_img = Img(file_dicts[2], aupe_info)
+
         # create RGB object
         rgb = cls((red_img, green_img, blue_img))
         return rgb
@@ -1782,8 +1799,12 @@ class RGB:
         self.balance_vector[method] = np.array([r_stretch, g_stretch, b_stretch])
 
     def reset_balance_vector(self, 
-                    method: Literal['all', 'raw', 'bpb', 'bpu', 'wps', '99b', '99u']='all'):
-        """Reset the balance vector to all ones
+                method: Literal['all', 'raw', 'bpb', 'bpu', 
+                                'wps', '99b', '99u']='all') -> None:
+        """Reset the balance vector to all zeroes
+
+        :param method: method for finding the stretch coefficient
+        :type method: Literal['raw', 'bpb', 'bpu', 'wps', '99b', '99u', 'all'], optional
         """
         if method == 'all':
             self.balance_vector = {
@@ -1794,10 +1815,19 @@ class RGB:
                 '99b': np.zeros(3),
                 '99u': np.zeros(3)
             }
+            self.red.reset_stretch_coefficient('all')
+            self.green.reset_stretch_coefficient('all')
+            self.blue.reset_stretch_coefficient('all')
         elif method == 'raw':
             self.balance_vector[method] = np.ones(3)
-        else:
+            self.red.reset_stretch_coefficient('raw')
+            self.green.reset_stretch_coefficient('raw')
+            self.blue.reset_stretch_coefficient('raw')
+        else:            
             self.balance_vector[method] = np.zeros(3)            
+            self.red.reset_stretch_coefficient(method)
+            self.green.reset_stretch_coefficient(method)
+            self.blue.reset_stretch_coefficient(method)
 
     def apply_balance_vector(self, colour_correction: Literal['raw', 'bpb', 'bps', 'wps', '99p']='raw'):
 
@@ -1863,14 +1893,25 @@ class RGB:
 
     def export_image(self, 
                      colour_correction: Literal['raw', 'bpb', 'bpu', 'wps', '99b','99u', 'ccm']='raw',
-                     show: bool=False):
+                     show: bool=False) -> Path:
         """Export the image to an 8-bit RGB image file, using the stretch method
 
         :param stretch_method: Stretch method to use, defaults to 'raw'
         :type stretch_method: Literal['raw', 'bps', 'wps'], optional
+        :param tag: Optional tag to add to the filename - e.g. the image feature
+            used to perform rectification with, defaults to None
+        :type tag: str, optional
+        :param show: Whether to show the image after exporting, defaults to False
+        :type show: bool, optional
+        :return: Path to the exported image file
+        :rtype: Path
         """   
         
-        title = f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_RGB_{colour_correction}.png"
+        if self.tag is not None:
+            # add the tag to the title
+            title = f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_RGB_{self.red.filter_id}{self.green.filter_id}{self.blue.filter_id}_{colour_correction}_{self.tag}.png"
+        else:
+            title = f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_RGB_{self.red.filter_id}{self.green.filter_id}{self.blue.filter_id}_{colour_correction}.png"
 
         print(f"Exporting image using {STRETCH_DICT[colour_correction]}")
         if colour_correction == 'ccm':
@@ -1927,10 +1968,10 @@ class HRC(RGB):
     data. The allocation of the same HRC image to each channel
     is handled by the AupeIO class.
     """    
-    def __init__(self, rgb_path_dict: Tuple[Dict, Dict, Dict],
-                 aupe_info: AupeInfo):
-        super().__init__(rgb_path_dict, aupe_info)
+    def __init__(self,  rgb_imgs: Tuple[Img, Img, Img], aupe_info: AupeInfo):
+        super().__init__(rgb_imgs)        
         self.debayered = False
+        self.aupe_info = aupe_info
         
         # relabel the channels of the hrc r,g,b images, and update other
         # attributes
@@ -1938,20 +1979,45 @@ class HRC(RGB):
         self.red.cwl = aupe_info.cwl['HRCR']
         self.red.fwhm = aupe_info.fwhm['HRCR']  
         self.red.filter_id = aupe_info.filter_id['HRCR']
+        self.red.filter_response = self.red.load_filter_response()
         self.green.channel = 'HRCG'
         self.green.cwl = aupe_info.cwl['HRCG']
         self.green.fwhm = aupe_info.fwhm['HRCG']
         self.green.filter_id = aupe_info.filter_id['HRCG']
+        self.green.filter_response = self.green.load_filter_response()
         self.blue.channel = 'HRCB'
         self.blue.cwl = aupe_info.cwl['HRCB']
         self.blue.fwhm = aupe_info.fwhm['HRCB']
         self.blue.filter_id = aupe_info.filter_id['HRCB']
+        self.blue.filter_response = self.blue.load_filter_response()
+
+    @classmethod
+    def from_filedicts(cls, 
+                    file_dicts: Tuple[Dict, Dict, Dict],
+                    aupe_info: AupeInfo) -> 'RGB':
+        """Create an RGB object from a tuple of file dictionaries.
+        :param file_dicts: Tuple of file dictionaries for red, green, and blue channels
+        :type file_dicts: Tuple[Dict, Dict, Dict]
+        :param aupe_info: AupeInfo object containing camera and filter information
+        :type aupe_info: AupeInfo
+        :return: RGB object
+        :rtype: RGB
+        """
+        # create Img objects for each channel
+        red_img = Img(file_dicts[0], aupe_info)
+        green_img = Img(file_dicts[1], aupe_info)
+        blue_img = Img(file_dicts[2], aupe_info)
+
+        # create RGB object
+        rgb = cls((red_img, green_img, blue_img), aupe_info)
+        return rgb
 
     def debayer(self, 
                 method: Literal[
                     'simple', 
                     'edge-aware', 
-                    'variable-number-of-gradients']='edge-aware'):
+                    'variable-number-of-gradients']='edge-aware',
+                to_msc: bool=False) -> Union[None, 'MSC']:
         """Perform debayering on the HRC frame, using the OpenCV debayer
         method.        
         """        
@@ -1978,6 +2044,19 @@ class HRC(RGB):
                                         axis=2)
             self.reset_balance_vector('all')
             self.debayered = True
+        
+            if to_msc:
+                # make a blank MSC, and put the debayered images in it
+                msc_frame = MSC(
+                    imgs=[self.red, self.green, self.blue],
+                    aupe_info=self.aupe_info)
+                print('HRC frame debayered and converted to MSC')
+                # set the false colour to the hrc frame
+                msc_frame.false_rgb = self
+                return msc_frame
+            else:
+                return None
+            
 
     def hrc2wac_ccm(self, 
                      wac_frame: RGB, 
@@ -2071,12 +2150,12 @@ class MSC:
     include MSC loading and reflectance calibration.
     """    
     def __init__(self, 
-                 msc_path_dicts: List[Dict],
+                 imgs: List[Img],
                  aupe_info: AupeInfo):
-        self.n_bands = len(msc_path_dicts)
+        self.n_bands = len(imgs)
         self.aupe_info = aupe_info
-        self.imgs = [Img(path_dict, aupe_info) for path_dict in msc_path_dicts] # TODO change to preserve dict order
-        self.filter_ids = [path_dict['filter_id'] for path_dict in msc_path_dicts]
+        self.imgs = imgs # TODO change to preserve dict order
+        self.filter_ids = [img.filter_id for img in imgs]
         self.cwls = np.array([img.cwl for img in self.imgs])
         self.fwhms = np.array([img.fwhm for img in self.imgs])
 
@@ -2096,6 +2175,7 @@ class MSC:
         self.units = 'DN'
         self.dtype = self.imgs[0].image.dtype
         self.camera = self.imgs[0].camera
+        self.tag = None # optinoal tag for indicating the image feature used to perform rectification with
         self.trial = self.imgs[0].trial
         self.scene = self.imgs[0].scene
         self.sol = self.imgs[0].sol
@@ -2107,6 +2187,25 @@ class MSC:
         self.refl_offset = np.zeros(self.n_bands)
         self.false_rgb = None
         self.calibration_target = None
+
+    @classmethod
+    def from_filedicts(cls, 
+                    file_dicts: List[Dict],
+                    aupe_info: AupeInfo) -> 'RGB':
+        """Create an RGB object from a tuple of file dictionaries.
+        :param file_dicts: Tuple of file dictionaries for red, green, and blue channels
+        :type file_dicts: Tuple[Dict, Dict, Dict]
+        :param aupe_info: AupeInfo object containing camera and filter information
+        :type aupe_info: AupeInfo
+        :return: RGB object
+        :rtype: RGB
+        """
+        # create Img objects for each channel
+        imgs = [Img(path_dict, aupe_info) for path_dict in file_dicts] 
+
+        # create MSC object
+        msc = cls(imgs, aupe_info)
+        return msc
 
     def plot_exposures(self):
         """Plot the exposures as a function of wavelength
@@ -2250,7 +2349,10 @@ class MSC:
                                     (band_dict[bands['R']], 
                                     band_dict[bands['G']],
                                     band_dict[bands['B']]))
-        self.false_rgb = false_colour_rgb        
+        self.false_rgb = false_colour_rgb     
+        # set the output directory to RGB
+        self.false_rgb.out_dir = self.out_dir / 'RGB'           
+        self.false_rgb.out_dir.mkdir(parents=True, exist_ok=True)
 
     def export_2_envi(self):
         """Export the Reflectance calibrated image stack to an ENVI file format.
@@ -2261,8 +2363,13 @@ class MSC:
         # save the reflectance coefficients to a csv file
         self.export_reflectance_coefficients()
 
+        if self.tag is not None:
+            envi_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl_{self.tag}.hdr")
+        else:
+            envi_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl.hdr")
+
         envi.save_image(
-            str(self.out_dir / f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl.hdr"),
+            str(envi_path.resolve()),
             self.stack,
             dtype=self.dtype,
             force=True,
@@ -2277,17 +2384,47 @@ class MSC:
                 'wavelength units': 'nm'
             }
         )
+    
+    def export_2_gif(self):
+        """Export the image stack to a gif file, showing the filter IDs and
+        centre wavelengths.
+        """
+        images = []
+        if self.tag is not None:
+            gif_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl_{self.tag}.gif")
+        else:
+            gif_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl.gif")
+        for img in self.imgs:
+            print(f'Exporting image {img.filter_id} ')
+            img_slice = Image.fromarray(np.uint8(img.get_image('raw')*255))
+            # add text to the image
+            img_slice = img_slice.convert("RGBA")
+            text = f"{img.filter_id}: {img.cwl} nm"
+            draw = ImageDraw.Draw(img_slice)
+            font = ImageFont.load_default(size=24)
+            draw.text((0, 0), text, fill=(255, 255, 0, 255), font=font)
+            img_slice = img_slice.convert("RGB")
+            images.append(img_slice)
+        if images:        
+            images[0].save(str(gif_path.resolve()), save_all=True, append_images=images[1:], duration=500, loop=0)
 
 class StereoTools:
     """A class for stereo tools, such as camera calibration and stereo rectification.
     """
     def __init__(self, 
-                 src_frame: Union[Img, RGB, HRC, WAC_RGB],
-                 dst_frame: Union[Img, RGB, HRC, WAC_RGB]) -> None:
+                 src: NDArray,
+                 dst: NDArray) -> None:
         """Initialize the StereoTools class with source and destination frames.   
+
+        :param src: Source image as a NumPy array.
+        :type src: NDArray
+        :param dst: Destination image as a NumPy array.
+        :type dst: NDArray
         """
-        self.src = src_frame
-        self.dst = dst_frame
+        self.src = src
+        self.dst = dst
+        self.src_mask = np.zeros(self.src.shape[:2], dtype=np.uint8)
+        self.dst_mask = np.zeros(self.dst.shape[:2], dtype=np.uint8)
         self.pts_src = np.empty(1)
         self.pts_dst = np.empty(1)
         self.homography = np.zeros((3, 3))
@@ -2295,18 +2432,15 @@ class StereoTools:
     def cvtFrame2cv2(self):
         """Convert the source and destination frames to OpenCV format images.
         """
-        src_img = self.src.get_image('99u')
-        src_img_uint = (np.clip(src_img,0,1) * 255).astype('uint8')
-        if isinstance(self.src, RGB) or isinstance(self.src, HRC) or isinstance(self.src, WAC_RGB):
-            self.src = cv2.cvtColor(src_img_uint, cv2.COLOR_RGBA2BGR)
+        src_img_uint = (np.clip(self.src,0,1) * 255).astype('uint8')
+        if self.src.shape[-1] == 3:
+            self.src = cv2.cvtColor(src_img_uint, cv2.COLOR_RGB2BGR)
         else:
             self.src = src_img_uint
-
-        # prepare the images        
-        dst_img = self.dst.get_image('99u')
-        dst_img_uint = (np.clip(dst_img,0,1) * 255).astype('uint8')
-        if isinstance(self.dst, RGB) or isinstance(self.dst, HRC) or isinstance(self.dst, WAC_RGB):
-            self.dst = cv2.cvtColor(dst_img_uint, cv2.COLOR_RGBA2BGR)
+        
+        dst_img_uint = (np.clip(self.dst,0,1) * 255).astype('uint8')
+        if self.dst.shape[-1] == 3:
+            self.dst = cv2.cvtColor(dst_img_uint, cv2.COLOR_RGB2BGR)
         else:
             self.dst = dst_img_uint 
 
@@ -2314,7 +2448,7 @@ class StereoTools:
         """Select matching regions in the source and destination images.
         This is a placeholder for manual selection of matching regions.
         """               
-        if not isinstance(self.src, np.ndarray):
+        if not isinstance(self.src.dtype, float):
             self.cvtFrame2cv2() 
 
         prompt = "Select Src. Region for Optimal Rectification"
@@ -2324,7 +2458,7 @@ class StereoTools:
         # set pixels outside of box to NaN
         src_mask = np.zeros(self.src.shape[:2], dtype=np.uint8)
         src_mask[src_box[1]:src_box[1]+src_box[3], src_box[0]:src_box[0]+src_box[2]] = 255
-        self.src = cv2.bitwise_and(self.src, self.src, mask=src_mask)
+        self.src_mask = src_mask
 
         prompt = "Select same Region in Dst."
         dst_box = cv2.selectROI(prompt, self.dst)
@@ -2333,8 +2467,7 @@ class StereoTools:
         # set pixels outside of box to NaN
         dst_mask = np.zeros(self.dst.shape[:2], dtype=np.uint8)
         dst_mask[dst_box[1]:dst_box[1]+dst_box[3], dst_box[0]:dst_box[0]+dst_box[2]] = 255
-        self.dst = cv2.bitwise_and(self.dst, self.dst, mask=dst_mask)
-      
+        self.dst_mask = dst_mask
 
     def findMatches(self, show: bool=False) -> None:
         """Find matches between the source and destination images using SIFT.
@@ -2347,13 +2480,16 @@ class StereoTools:
         
         # find the keypoints and descriptors with SIFT
         try:
-            kp_src, des_src = sift.detectAndCompute(self.src,None)
+            # apply mask
+            src_img = cv2.bitwise_and(self.src, self.src, mask=self.src_mask)
+            kp_src, des_src = sift.detectAndCompute(src_img, None)
         except cv2.error as e:
             print(f"Error in SIFT detection for source image: {e}")
             print("Try running cvtFrame2cv2() to convert the images to OpenCV format.")
             return
         try:
-            kp_dst, des_dst = sift.detectAndCompute(self.dst,None)
+            dst_img = cv2.bitwise_and(self.dst, self.dst, mask=self.dst_mask)
+            kp_dst, des_dst = sift.detectAndCompute(dst_img,None)
         except cv2.error as e:
             print(f"Error in SIFT detection for destination image: {e}")
             print("Try running cvtFrame2cv2() to convert the images to OpenCV format.")
@@ -2372,12 +2508,13 @@ class StereoTools:
         if show:
             # cv.drawMatchesKnn expects list of lists as matches.
             img3 = cv2.drawMatchesKnn(
-                            self.src,kp_src,
-                            self.dst,kp_dst,
+                            cv2.cvtColor(self.src, cv2.COLOR_RGB2BGR), kp_src,
+                            cv2.cvtColor(self.dst, cv2.COLOR_RGB2BGR), kp_dst,
                             good,None,
                             flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
             
             plt.imshow(img3),plt.show()
+        print(f"Found {len(good)} good matches between source and destination regions.")
         
         pts_src = []
         pts_dst = []
@@ -2396,8 +2533,9 @@ class StereoTools:
     def findWarp(self, show: bool=False) -> None:
         """Find the homography between the source and destination images.
         """
-        if not isinstance(self.src, np.ndarray):
+        if self.src.dtype == float:
             self.cvtFrame2cv2()
+
         self.findMatches(show)
 
         h, mask = cv2.findHomography(self.pts_src, self.pts_dst, cv2.RANSAC)
@@ -2411,11 +2549,25 @@ class StereoTools:
     def applyWarp(self, 
                   src_frame: Union[Img, RGB, HRC, WAC_RGB, MSC], 
                   dst_frame: Union[Img, RGB, HRC, WAC_RGB, MSC],
-                  wrp_frame: Union[Img, RGB, HRC, WAC_RGB, MSC]) -> np.ndarray:
-        """Apply the homography to the source frame to warp it to the destination frame.
-        The destination frame should be a prepared src-bands +  dst-bands MSC.
+                  wrp_frame: Union[Img, RGB, HRC, WAC_RGB, MSC],
+                  tag: str):
+        """Apply the homography to the source frame to warp it to the 
+        destination frame. Put the warped frame and unwarped destination
+        frame into the wrp_frame. Add a tag describing the
+        image feature used to perform rectification with, e.g. 'target', 'cliff'
 
-        Placeholder -- we assume the destination frame is an all-band MSC.
+        :param src_frame: Source frame to be warped
+        :type src_frame: Union[Img, RGB, HRC, WAC_RGB, MSC]
+        :param dst_frame: Destination frame to be warped to
+        :type dst_frame: Union[Img, RGB, HRC, WAC_RGB, MSC]
+        :param wrp_frame: Frame to put the warped source and unwarped destination
+            frames into
+        :type wrp_frame: Union[Img, RGB, HRC, WAC_RGB, MSC]
+        :param tag: Tag describing the image feature used to perform rectification with
+        :type tag: str
+        :return: The warped frame with the source and destination images
+            applied to it.
+        :rtype: Union[Img, RGB, HRC, WAC_RGB, MSC]
         """
         if isinstance(src_frame, Img):
             src_mat = src_frame.image
@@ -2445,6 +2597,10 @@ class StereoTools:
 
         if isinstance(wrp_frame, Img):
             wrp_frame.image = wrp_mat
+            wrp_frame.units = src_frame.units
+            wrp_frame.dtype = src_frame.dtype
+            wrp_frame.reset_stretch_coefficient('all')
+
 
         elif isinstance(wrp_frame, (RGB, HRC, WAC_RGB)):
             wrp_frame.rgb_image = wrp_mat
@@ -2452,6 +2608,15 @@ class StereoTools:
             wrp_frame.red.image = wrp_mat[:,:,0]
             wrp_frame.green.image = wrp_mat[:,:,1]
             wrp_frame.blue.image = wrp_mat[:,:,2]
+            # copy across the ccm
+            wrp_frame.ccm = src_frame.ccm
+            # update units and dtype
+            wrp_frame.units = src_frame.units
+            wrp_frame.dtype = src_frame.dtype
+            wrp_frame.red.units = src_frame.red.units
+            wrp_frame.green.units = src_frame.green.units
+            wrp_frame.blue.units = src_frame.blue.units
+            wrp_frame.reset_balance_vector('all')      
 
         elif isinstance(wrp_frame, MSC):
             # check that the filter ids of the src are in the warp frame
@@ -2459,10 +2624,7 @@ class StereoTools:
             src_filter_ids = src_frame.filter_ids
             if not all(band in wrp_filter_ids for band in src_filter_ids):
                 raise ValueError("Source frame filter IDs are not in Warp frame")
-            # check that the filter ids of the destination are in the warp frame
-            dst_filter_ids = dst_frame.filter_ids
-            if not all(band in wrp_filter_ids for band in dst_filter_ids):
-                raise ValueError("Destination frame filter IDs are not in Warp frame")
+
             
             # make sure the stack dtype is float32
             wrp_frame.stack = np.zeros(
@@ -2484,26 +2646,70 @@ class StereoTools:
                 wrp_frame.refl_coeffs[wrp_band_idx] = src_frame.imgs[i].refl_coeff
                 wrp_frame.refl_offset[wrp_band_idx] = src_frame.imgs[i].refl_offset
                 wrp_frame.imgs[wrp_band_idx].reset_stretch_coefficient('all')
-
-            # copy the warp destination images into the destination bands of the warp frame    
-            for i, band in enumerate(dst_filter_ids):
-                wrp_band_idx = wrp_filter_ids.index(band)
-                # update both stack and Img's
-                wrp_frame.stack[:,:,wrp_band_idx] = dst_mat[:,:,i]
-                wrp_frame.imgs[wrp_band_idx].image = dst_mat[:,:,i]
-                # update warp frame properties to match the destination frame
-                wrp_frame.imgs[wrp_band_idx].units = dst_frame.imgs[i].units
-                wrp_frame.imgs[wrp_band_idx].dtype = dst_frame.imgs[i].dtype
-                wrp_frame.imgs[wrp_band_idx].refl_coeff = dst_frame.imgs[i].refl_coeff
-                wrp_frame.imgs[wrp_band_idx].refl_offset = dst_frame.imgs[i].refl_offset
-                wrp_frame.imgs[wrp_band_idx].reset_stretch_coefficient('all')
-                wrp_frame.refl_coeffs[wrp_band_idx] = dst_frame.imgs[i].refl_coeff
-                wrp_frame.refl_offset[wrp_band_idx] = dst_frame.imgs[i].refl_offset
             
-            wrp_frame.camera = 'LRWAC'
+            # check that the filter ids of the destination are in the warp frame
+            dst_filter_ids = dst_frame.filter_ids
+            if all(band in wrp_filter_ids for band in dst_filter_ids):               
+                # copy the warp destination images into the destination bands of the warp frame    
+                for i, band in enumerate(dst_filter_ids):
+                    wrp_band_idx = wrp_filter_ids.index(band)
+                    # update both stack and Img's
+                    wrp_frame.stack[:,:,wrp_band_idx] = dst_mat[:,:,i]
+                    wrp_frame.imgs[wrp_band_idx].image = dst_mat[:,:,i]
+                    # update warp frame properties to match the destination frame
+                    wrp_frame.imgs[wrp_band_idx].units = dst_frame.imgs[i].units
+                    wrp_frame.imgs[wrp_band_idx].dtype = dst_frame.imgs[i].dtype
+                    wrp_frame.imgs[wrp_band_idx].refl_coeff = dst_frame.imgs[i].refl_coeff
+                    wrp_frame.imgs[wrp_band_idx].refl_offset = dst_frame.imgs[i].refl_offset
+                    wrp_frame.imgs[wrp_band_idx].reset_stretch_coefficient('all')
+                    wrp_frame.refl_coeffs[wrp_band_idx] = dst_frame.imgs[i].refl_coeff
+                    wrp_frame.refl_offset[wrp_band_idx] = dst_frame.imgs[i].refl_offset
+            
+            if src_frame.camera == 'LRWAC' and dst_frame.camera == 'HRC':
+                wrp_frame.camera = 'LRWHRC'
+            elif src_frame.camera == 'LWAC' and dst_frame.camera == 'RWAC':
+                wrp_frame.camera = 'LRWAC'
             wrp_frame.units = wrp_frame.imgs[0].units
             wrp_frame.dtype = wrp_frame.imgs[0].dtype
                 
-        return wrp_frame
+        wrp_frame.tag = tag
+        # add the tag to the output directory
+        wrp_frame.out_dir = wrp_frame.out_dir / tag
+        # make sure the output directory exists
+        wrp_frame.out_dir.mkdir(parents=True, exist_ok=True)
 
-    
+    def depth_map(self):
+        """Generate a depth map from the source and destination images.
+        TODO
+        Current iteration just finds a basic disparity map, that is noisy.
+        """
+        if not isinstance(self.src, np.ndarray):
+            self.cvtFrame2cv2()
+        if not isinstance(self.dst, np.ndarray):
+            self.cvtFrame2cv2()
+
+        # if RGB images, convert to grayscale
+        if len(self.src.shape) == 3 and self.src.shape[2] == 3:
+            src = cv2.cvtColor(self.src, cv2.COLOR_BGR2GRAY)
+        else:
+            src = self.src
+        
+        if len(self.dst.shape) == 3 and self.dst.shape[2] == 3:
+            dst = cv2.cvtColor(self.dst, cv2.COLOR_BGR2GRAY)
+        else:
+            dst = self.dst
+
+        stereo = cv2.StereoBM.create(numDisparities=64, blockSize=5)
+        disparity = stereo.compute(src, dst)
+
+        # where -16 set to 0
+        disparity[disparity < 0] = 0
+
+        # filter out sal and pepper noise
+        disparity = cv2.medianBlur(disparity, 5)
+
+        plt.imshow(disparity,'viridis')
+        plt.colorbar()
+        plt.title('Disparity Map')
+        plt.show()
+        return disparity
