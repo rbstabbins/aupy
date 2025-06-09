@@ -1,0 +1,22 @@
+name: aupy_dev
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - click=8.1.8=pyh707e725_0
+  - ipykernel=6.29.5=pyh57ce528_0
+  - ipython=9.2.0=pyhfb0248b_0
+  - matplotlib=3.10.1=py313h39782a4_0
+  - numpy=2.2.5=py313h41a2e72_0
+  - opencv=4.11.0=headless_py313h441765f_5
+  - pandas=2.2.3=py313h668b085_3
+  - pillow=11.2.1=py313hb37fac4_0
+  - pip=25.1.1=pyh145f28c_0
+  - qtpy=2.4.3=pyhd8ed1ab_0
+  - scipy=1.15.2=py313h9a24e0a_0
+  - pip:
+      - pyqt5==5.15.11
+      - roipoly==0.5.3
+      - seaborn==0.13.2
+      - spectral==0.24
+      - ultralytics==8.3.133
