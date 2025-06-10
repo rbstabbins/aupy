@@ -1,6 +1,0 @@
-{
-    "python.linting.enabled": true,
-    "python.linting.pylintEnabled": true,
-    "editor.ruler": 80,
-    "commentTranslate.hover.enabled": false
-}
