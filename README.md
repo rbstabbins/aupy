@@ -1,6 +1,6 @@
 # aupy: AUPE Reflectance and Colour Calibration in Python
 
-![AUPE Reflectance and Colour Calibration](cover.png)
+![AUPE Reflectance and Colour Calibration](./example_images/cover.png)
 
 ## About <a name = "about"></a>
 
