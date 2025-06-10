@@ -688,6 +688,8 @@ class CalibrationTarget:
         fig, ax = plt.subplots(1,1, figsize=(4, 4))
         ax.imshow(annotated_image)
         plt.show()
+        # set the title
+        ax.set_title('Calibration Target Outline')
 
         return fig, ax
 
@@ -748,28 +750,22 @@ class CalibrationTarget:
 
     def get_bad_patches(self, 
                         frame: Union['Img', 'RGB', 'HRC', 'WAC_RGB', 'MSC']
-                        ) -> List[str]:
-        """Get the list of bad patches for the given frame, based on the 
-        calibration target patch names.
-
-        # TODO this should really get bad patches for each band. i.e. each band should have a list of bad patches.
-        # We could attach 
+                        ) -> None:
+        """Find the bad patches in each channel of the given frame.
+        A baad patch means an overexposed patch.
+        Set bad_patches attribute to a boolean array of shape
+        (n_patches, n_channels) where True indicates a bad patch.
 
         :param frame: The frame to get the bad patches for
         :type frame: Union[Img, HRC, WAC_RGB]
-        :return: List of bad patches
-        :rtype: List[str]
         """
         # check the frame outline has been set
         if self.target_outline is None or self.target_outline.size == 0:
             raise ValueError("Calibration target outline not set. " \
                                 "Please run find_calibration_target() first.")
         
-
-        # if an image, key the bad patch list to the img filter id
+        # if an image
         if isinstance(frame, Img):
-            # get img filter id
-            filter_id = frame.filter_id
             # get the values of the image
             observed_vals = self.get_observed_colours(frame.image)
             # get the upper limit of the patch values
@@ -781,13 +777,13 @@ class CalibrationTarget:
                 patch_max = 1.0
             else:
                 raise ValueError(f"TODO: Define max value for {frame.units}")
-            # check if any of the observed values are above the patch max
             # tile the patch_max to match the number of patches
             patch_max = np.tile([patch_max], (len(self.patch_names),1))
             # check if any of the observed values are above the patch max
             bad_idx = np.around(observed_vals,2) >= np.around(patch_max,2)
             self.bad_patches = bad_idx
 
+        # if a RGB or HRC or WAC_RGB frame
         elif isinstance(frame, (RGB, WAC_RGB, HRC)):
             # get the values of the image
             observed_vals = self.get_observed_colours(frame.rgb_image)
@@ -805,14 +801,13 @@ class CalibrationTarget:
                 patch_max = np.array([1.0] * 3)
             else:
                 raise ValueError(f"TODO: Define max value for {frame.units}")
-            # check if any of the observed values are above the patch max
+            # tile the patch_max to match the number of patches
+            patch_max = np.tile([patch_max], (len(self.patch_names),1))        
             # for each channel, check if the observed values are above the patch max
-            patch_max = np.tile([patch_max], (len(self.patch_names),1))
-            # check if any of the observed values are above the patch max
-            print(observed_vals.shape, patch_max.shape)
             bad_idx = np.around(observed_vals,2) >= np.around(patch_max,2)
             self.bad_patches = bad_idx
 
+        # if a multispectral cube frame
         elif isinstance(frame, MSC):
             # get the observed colours from the reflectance values
             observed_vals, observed_stds = self.get_observed_spectra(frame, method='mean')
@@ -822,9 +817,10 @@ class CalibrationTarget:
             elif frame.units == 'DN/s':
                 patch_max = np.array([(2**BIT_DEPTH - 1) / img.exposure for img in frame.imgs])
             elif frame.units == 'Reflectance':
-                patch_max = np.array([1.0] * len(frame.imgs))
+                patch_max = np.array([1.0] * frame.n_bands)
             else:
                 raise ValueError(f"TODO: Define max value for {frame.units}")
+            # tile the patch_max to match the number of patches
             patch_max = np.tile([patch_max], (len(self.patch_names),1))
             # check if any of the observed values are above the patch max
             bad_idx = np.around(observed_vals,2) >= np.around(patch_max,2)
@@ -881,8 +877,7 @@ class CalibrationTarget:
         :type reference_cols: NDArray
         :return: 3x3 Colour correction matrix
         :rtype: NDArray
-        """
-        print(observed_cols.shape, reference_cols.shape)
+        """        
         # check the observed and reference values have the same shape
         if observed_cols.shape != reference_cols.shape:
             raise ValueError(f"Observed values shape {observed_cols.shape} " \
@@ -896,10 +891,10 @@ class CalibrationTarget:
                              f"got {reference_cols.shape[1]} channels")
     
         # drop any row with nan values
-        mask = np.all(~np.isnan(observed_cols), axis=1) & np.all(~np.isnan(reference_cols), axis=1)
+        mask = np.all(~np.isnan(observed_cols), axis=1) & np.all(~np.isnan(reference_cols), axis=1)  
         observed_cols = observed_cols[mask]
         reference_cols = reference_cols[mask]
-            
+
         ccm = colour.matrix_colour_correction(observed_cols, reference_cols)
         # apply the ccm to the reference values to get the corrected values
         cor_vals = colour.apply_matrix_colour_correction(observed_cols, ccm)
@@ -915,7 +910,7 @@ class CalibrationTarget:
 
     def calibrate_colour(self, 
                 frame: Union['RGB', 'WAC_RGB', 'HRC'],                 
-                show: bool=False) -> NDArray:
+                show: bool=False) -> None:
         """Calibrate the Colour Correction Matrix (CCM) and Gamma 
         for the given frame.   
 
@@ -932,7 +927,7 @@ class CalibrationTarget:
                 "Please run find_target_outline(frame) or draw_target_outline(frame) first.")    
         
         if frame.units != 'Reflectance':
-            drgb_image = frame.get_image('bpu') # get vals from raw image
+            drgb_image = frame.get_image('bpu') # get vals from raw image            
             obs_ct_dRGB_vals = self.get_observed_colours(drgb_image, show=show)
             # get the reference values
             ref_ct_sRGB_vals = self.patch_ref_sRGB
@@ -945,7 +940,7 @@ class CalibrationTarget:
                 bad_patch_mask = np.tile(np.any(bad_patch_mask, axis=1), (bad_patch_mask.shape[1], 1)).T 
             else:
                 # if no bad patches, use all patches
-                bad_patch_mask = np.ones((len(self.patch_names), 3), dtype=bool)
+                bad_patch_mask = np.zeros((len(self.patch_names), 3), dtype=bool)
 
             obs_masked = obs_ct_dRGB_vals.copy()
             ref_masked = ref_ct_sRGB_vals.copy()
@@ -967,11 +962,10 @@ class CalibrationTarget:
 
             # apply bad patches
             if len(self.bad_patches) > 0:
-                bad_patch_mask = ~self.bad_patches
-                # bad_patch_mask = np.tile(np.any(bad_patch_mask, axis=1), (bad_patch_mask.shape[1], 1)).T 
+                bad_patch_mask = self.bad_patches
             else:
                 # if no bad patches, use all patches
-                bad_patch_mask = np.ones((len(self.patch_names), len(frame.imgs)), dtype=bool)
+                bad_patch_mask = np.zeros((len(self.patch_names), 3), dtype=bool)
 
             obs_masked = obs_ct_dRGB_vals.copy()
             ref_masked = ref_ct_RGB_vals.copy()
@@ -1018,7 +1012,8 @@ class CalibrationTarget:
             
             colour.plotting.plot_multi_colour_checkers([ref_colour_checker, cor_colour_checker])   
             
-            # draw a plot of the rgb values against one another to see the trend
+            # draw a plot of the rgb values against one another to see the trend            
+            plt.style.use('default') # set style to default
             fig, ax = plt.subplots(1, 1)            
             cols = np.clip(self.patch_ref_sRGB, 0,1)
             for patch in range(len(self.patch_names)):
@@ -1053,8 +1048,6 @@ class CalibrationTarget:
 
             # save the plot
             fig.savefig(Path(frame.out_dir, 'calibration_target_sRGB_fit.png'))
-
-        return ccm
 
     def get_observed_spectra(self,
                                 frame,
@@ -1192,7 +1185,8 @@ class CalibrationTarget:
 
     def calibrate_reflectance(self,
                             frame: 'MSC',
-                            method: Literal['mean', 'gauss-fit'] = 'gauss-fit',                            
+                            method: Literal['mean', 'gauss-fit'] = 'gauss-fit',  
+                            bad_patch_list: Optional[List[str]]=None,                          
                             show: bool=False) -> None:
         """Calibrate the given frame to the values of the colour checker patches 
         in each band of the frame, setting the reflectance correction 
@@ -1217,25 +1211,23 @@ class CalibrationTarget:
 
         colors = colour.cctf_encoding(np.clip(self.patch_ref_sRGB, 0,1))
 
-        # # where std dev is 0, implies an overexposed patch, so add that patch to bad patches
-        # for p, patch in enumerate(self.patch_names):
-        #     if np.any(np.abs(obs_ave[:, p]/obs_std[:, p]) < 100.0) or np.any(obs_ave[:, p] < 0.0):
-        #         # if the mean:standard deviation ratio is less than 0, add the patch to the bad patches, if not already in bad patches
-        #         if patch not in self.bad_patches:
-        #             self.bad_patches.append(patch)
-        
-        # # print the bad patches
-        # if len(self.bad_patches) > 0:
-        #     print(f"Bad patches: {', '.join(self.bad_patches)}")
-
-        # turn bad patches into a bool mask to use on x and y for linregress
-        # get bool mask where patch names are in the bad patches
+        # get bad patch mask
         if len(self.bad_patches) > 0:
             # if no bad patches are given, use all patches
             bad_patch_mask = self.bad_patches
         else:
             # if bad patches are given, create a mask for them
-            bad_patch_mask = np.ones((len(self.patch_names), frame.n_bands), dtype=bool)
+            bad_patch_mask = np.zeros((len(self.patch_names), frame.n_bands), dtype=bool)
+
+        if bad_patch_list is not None:
+            # modulate th abd patch mask with the list of bad patches
+            for bad_patch in bad_patch_list:
+                if bad_patch in self.patch_names:
+                    idx = self.patch_names.index(bad_patch)
+                    # set the bad patch mask for this patch to True
+                    bad_patch_mask[idx, :] = True
+                else:
+                    print(f"Patch {bad_patch} not found in patch names, skipping")
                     
         # prepare plot of the observed vs reference values fit for each band
         if show:
@@ -1250,8 +1242,8 @@ class CalibrationTarget:
         refl_offsets = []
         for b, band in enumerate(frame.imgs):
             band_bad_patches = bad_patch_mask[:, b].flatten() # get the bad patches for this band
-            x = obs_ave[b,band_bad_patches]
-            y = ref_refl[b,band_bad_patches]
+            x = obs_ave[~band_bad_patches,b] # here we are using the bad band locations to filter the observed values
+            y = ref_refl[~band_bad_patches,b]            
             result = linregress(x, y)
             refl_coeffs.append(result.slope)
             refl_offsets.append(result.intercept)
@@ -1265,7 +1257,7 @@ class CalibrationTarget:
                     this_ax = ax[c]
                 else:
                     this_ax = ax[r][c]
-                col = colors[band_bad_patches]
+                col = colors[~band_bad_patches]
                 this_ax.scatter(x, y, c=col)
                 this_ax.plot(x, result.intercept + result.slope*x, 'r')
                 this_ax.set_xlabel(f'Power {frame.units}')
@@ -1273,11 +1265,12 @@ class CalibrationTarget:
                 this_ax.set_title(f'{band.filter_id} {band.cwl} nm')
 
         if show:
-            fig.suptitle(f'Reflectance Calibration for {frame.camera} {frame.sol} {frame.scene} {frame.trial}')
+            fig.suptitle(f'Reflectance Calibration for {frame.camera} {frame.sol} {frame.scene} {frame.trial}', fontsize='x-small')
             fig.tight_layout()
             # save the plot
+            filter_id_str = '_'.join(frame.filter_ids)
             fig.savefig(Path(frame.out_dir,
-                            f'reflectance_calibration_band_fits_{frame.camera}_{frame.sol}_{frame.scene}_{frame.trial}.png'))
+                            f'reflectance_calibration_band_fits_{frame.sol}_{frame.scene}_{frame.trial}_{frame.camera}_{filter_id_str}.png'))
 
         # set the reflectance coefficients for each band of the frame
         for b, band in enumerate(frame.imgs):
@@ -1296,11 +1289,17 @@ class CalibrationTarget:
             for p, patch_name in enumerate(self.patch_names):                
                 # get the observed values for this patch
                 cwls = frame.cwls # wavelengths of the frame                
-                obs_vals = obs_ave[:, p]
+                obs_vals = obs_ave[p, :]
                 # scale the observed values to reflectance
                 fit_spec = obs_vals*refl_coeffs + refl_offsets
-                ref_spec = ref_refl[:, p]
-                col = colors[p]
+                ref_spec = ref_refl[p, :]
+                if bad_patch_list is not None:
+                    if patch_name in bad_patch_list:
+                        col = 'k'
+                    else:
+                        col = colors[p]
+                else:
+                    col = colors[p]
                 plt.style.use('dark_background')
                 # draw the observed vs reference values fit for this patch
                 r = p // self.cols # current row
@@ -1322,8 +1321,9 @@ class CalibrationTarget:
             fig.suptitle(f'Reflectance Calibration Patch Fits for {frame.camera} {frame.sol} {frame.scene} {frame.trial}')
             fig.tight_layout()
         # save the plot
+            filter_id_str = '_'.join(frame.filter_ids)
             fig.savefig(Path(frame.out_dir,
-                            f'reflectance_calibration_patch_fits_{frame.camera}_{frame.sol}_{frame.scene}_{frame.trial}.png'))
+                            f'reflectance_calibration_patch_fits_{frame.sol}_{frame.scene}_{frame.trial}_{frame.camera}_{filter_id_str}.png'))
 
 class Img:
     def __init__(self, 
@@ -1807,12 +1807,13 @@ class RGB:
         pass
 
     def load_ccm(self,
+                 path: str=None,
                  camera: str=None,
                  sol: str=None,
                  scene: str=None,
                  trial: str=None):
         """Load the colour correction matrix from a csv file
-        """
+        """ 
         if camera is None:
             camera = self.camera
         if sol is None:
@@ -1822,21 +1823,24 @@ class RGB:
         if trial is None:
             trial = self.trial
 
-        # get the ccm directory
-        proc_dir = self.out_dir.parent.parent.parent.parent.parent
-        ccm_dir = Path(proc_dir, sol, scene, trial, camera, 'RGB')
-        # check the ccm dir exists
-        if not ccm_dir.exists():
-            raise FileNotFoundError(f"CCM directory {ccm_dir} does not exist")
-        # load the ccm from a csv file
-        filename = f"{sol}_{scene}_{trial}_{camera}_ccm.csv"
-        # check the file exists
-        if not Path(ccm_dir, filename).exists():
-            raise FileNotFoundError(f"CCM file {filename} does not exist in {ccm_dir}")
-        ccm_df = pd.read_csv(Path(ccm_dir, filename), header=None)
+        if path is None:
+            # get the ccm directory
+            proc_dir = self.out_dir.parent.parent.parent.parent.parent
+            ccm_dir = Path(proc_dir, sol, scene, trial, camera, 'RGB')
+            # check the ccm dir exists
+            if not ccm_dir.exists():
+                raise FileNotFoundError(f"CCM directory {ccm_dir} does not exist")
+            # load the ccm from a csv file
+            filename = f"{sol}_{scene}_{trial}_{camera}_ccm.csv"
+            path = Path(ccm_dir, filename)
+            # check the file exists
+            if not path.exists():
+                raise FileNotFoundError(f"CCM file {filename} does not exist in {ccm_dir}")
+
+        ccm_df = pd.read_csv(path, header=None)
         # read the gamma value from this
         self.ccm = ccm_df.to_numpy()
-        print(f"CCM loaded from {ccm_dir}/ccm.csv")
+        print(f"CCM loaded from {path}")
 
     def export_ccm(self):
         """Export the colour correction matrix to a csv file
@@ -2119,10 +2123,9 @@ class RGB:
             # show the image at full resolution
             plt.style.use('default')
             fig, ax = plt.subplots(1,1, figsize=(8, 4))  
-            ax.imshow(disp_img, vmin=0, vmax=255, interpolation='none')
-            ax.axis('off')
+            ax.imshow(disp_img, vmin=0, vmax=255, interpolation='none')            
             # set the title
-            fig.suptitle(title)
+            fig.suptitle(title, fontsize='x-small')
     
         return out_file
 
@@ -2349,7 +2352,7 @@ class MSC:
         self.tilt = self.imgs[0].tilt
         self.out_dir = self.imgs[0].out_dir
         self.refl_coeffs = np.zeros(self.n_bands)
-        self.refl_offset = np.zeros(self.n_bands)
+        self.refl_offsets = np.zeros(self.n_bands)
         self.false_rgb = None
         self.calibration_target = None
 
@@ -2468,7 +2471,7 @@ class MSC:
             raise ValueError(f"Both frames must have the same number of bands ({self.n_bands} != {frame.n_bands})")
                 
         m_r = colour.matrix_colour_correction(frame.refl_coeffs, self.refl_coeffs)
-        o_r = colour.matrix_colour_correction(frame.refl_offset, self.refl_offset)
+        o_r = colour.matrix_colour_correction(frame.refl_offsets, self.refl_offsets)
         # save the matrices to a csv file
      
         # get the input data directory
@@ -2508,41 +2511,47 @@ class MSC:
 
         # apply the transfer coefficients to the reflectance coefficients and offsets to the frame
         refl_coeffs = m_r @ frame.refl_coeffs
-        refl_offset = o_r @ frame.refl_offset
+        refl_offsets = o_r @ frame.refl_offsets
         # update the reflectance coefficients and offsets
         self.update_reflectance_coefficients(
             refl_coeffs=refl_coeffs.tolist(),
-            refl_offset=refl_offset.tolist()
+            refl_offsets=refl_offsets.tolist()
         )     
 
         # we also copy over the ccm to the false rgb image   
         if self.false_rgb is not None:
-            self.false_rgb.ccm = frame.false_rgb.ccm
+            # preferentially load the ccm of this object
+            ccm_path = self.aupe_info.data_dir / f"{self.camera}_reflectance2srgb_ccm.csv"
+            if ccm_path.exists():
+                self.false_rgb.load_ccm(ccm_path)
+            else:
+                # if the ccm file does not exist, use the destination frame's ccm
+                self.false_rgb.ccm = frame.false_rgb.ccm
             # update the false rgb image
             self.false_rgb.red.refl_coeff = self.refl_coeffs[0]
             self.false_rgb.green.refl_coeff = self.refl_coeffs[1]
             self.false_rgb.blue.refl_coeff = self.refl_coeffs[2]
-            self.false_rgb.red.refl_offset = self.refl_offset[0]
-            self.false_rgb.green.refl_offset = self.refl_offset[1]
-            self.false_rgb.blue.refl_offset = self.refl_offset[2]
+            self.false_rgb.red.refl_offset = self.refl_offsets[0]
+            self.false_rgb.green.refl_offset = self.refl_offsets[1]
+            self.false_rgb.blue.refl_offset = self.refl_offsets[2]
 
     def update_reflectance_coefficients(self,
         refl_coeffs: List[float],
-        refl_offset: List[float]) -> None:
+        refl_offsets: List[float]) -> None:
         """Update the reflectance coefficients and offsets for each band in the image stack.
         :param refl_coeffs: list of reflectance coefficients for each band
         :type refl_coeffs: List[float]
-        :param refl_offset: list of reflectance offsets for each band
-        :type refl_offset: List[float]
+        :param refl_offsets: list of reflectance offsets for each band
+        :type refl_offsets: List[float]
         :param filter_ids: list of filter IDs for each band
         :type filter_ids: List[str]
         """
         self.refl_coeffs = np.array(refl_coeffs)
-        self.refl_offset = np.array(refl_offset)
+        self.refl_offsets = np.array(refl_offsets)
         # update the reflectance coefficients in each band
         for i, band in enumerate(self.imgs):
             band.refl_coeff = self.refl_coeffs[i]
-            band.refl_offset = self.refl_offset[i]
+            band.refl_offset = self.refl_offsets[i]
         
 
     def apply_reflectance_calibration(self):
@@ -2589,10 +2598,11 @@ class MSC:
         coeffs_df = pd.DataFrame({
             'filter_id': self.filter_ids,
             'reflectance_coefficient': self.refl_coeffs,
-            'reflectance_offset': self.refl_offset
+            'reflectance_offset': self.refl_offsets
         })
         # add the camera, sol, scene, trial to the filename
-        filename = f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl_coeffs.csv"
+        filter_id_str = ''.join(self.filter_ids)
+        filename = f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_{filter_id_str}_refl_coeffs.csv"
         coeffs_df.to_csv(self.out_dir / filename, index=False)
         print(f"Reflectance coefficients saved to {self.out_dir}/{filename}")
         
@@ -2622,11 +2632,11 @@ class MSC:
 
         # save the reflectance coefficients to a csv file
         self.export_reflectance_coefficients()
-
+        filter_id_str = ''.join(self.filter_ids)
         if self.tag is not None:
-            envi_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl_{self.tag}.hdr")
+            envi_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_{filter_id_str}_refl_{self.tag}.hdr")
         else:
-            envi_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl.hdr")
+            envi_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_{filter_id_str}_refl.hdr")
 
         envi.save_image(
             str(envi_path.resolve()),
@@ -2650,10 +2660,11 @@ class MSC:
         centre wavelengths.
         """
         images = []
+        filter_id_str = ''.join(self.filter_ids)
         if self.tag is not None:
-            gif_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl_{self.tag}.gif")
+            gif_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_{filter_id_str}_refl_{self.tag}.gif")
         else:
-            gif_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_refl.gif")
+            gif_path = Path(self.out_dir, f"{self.sol}_{self.scene}_{self.trial}_{self.camera}_{filter_id_str}_refl.gif")
         for img in self.imgs:
             print(f'Exporting image {img.filter_id} ')
             img_slice = Image.fromarray(np.uint8(img.get_image('raw')*255))
@@ -2688,6 +2699,16 @@ class StereoTools:
         self.pts_src = np.empty(1)
         self.pts_dst = np.empty(1)
         self.homography = np.zeros((3, 3))
+
+        # show the two frame that will be used for rectification
+        plt.style.use('default')
+        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        ax[0].imshow(self.src, vmin=0, vmax=1, interpolation='none')
+        ax[0].set_title('Source Frame')
+        ax[1].imshow(self.dst, vmin=0, vmax=1, interpolation='none')
+        ax[1].set_title('Destination Frame')
+        plt.tight_layout()
+        plt.show()
 
     def cvtFrame2cv2(self):
         """Convert the source and destination frames to OpenCV format images.
@@ -2806,6 +2827,36 @@ class StereoTools:
         self.pts_src = self.pts_src[mask.ravel()==1]
         self.pts_dst = self.pts_dst[mask.ravel()==1]
 
+        if show:
+            # apply the homography
+            wrp = cv2.warpPerspective(
+                self.src, 
+                self.homography, 
+                (self.dst.shape[1], self.dst.shape[0])
+            )
+            # convert the src image to grayscale
+            src_gray = cv2.cvtColor(self.src, cv2.COLOR_BGR2GRAY)
+            dst_gray = cv2.cvtColor(self.dst, cv2.COLOR_BGR2GRAY)
+            wrp_gray = cv2.cvtColor(wrp, cv2.COLOR_BGR2GRAY)
+            # make an RGB image from the source and destination pre-warp
+            original = np.zeros_like(self.dst)
+            original[:,:,0] = src_gray
+            original[:,:,1] = dst_gray
+            original[:,:,2] = dst_gray
+            # make an RGB image with Red as source and blue and green as wrp
+            warped = np.zeros_like(self.dst)
+            warped[:,:,0] = wrp_gray
+            warped[:,:,1] = dst_gray
+            warped[:,:,2] = dst_gray
+            # show the combined image
+            plt.style.use('default')
+            fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+            ax[0].imshow(original)
+            ax[0].set_title('Src (Red) and Dst (Cyan) Images')
+            ax[1].imshow(warped)
+            ax[1].set_title('Wrp (Red) and Dst (Cyan) Images')
+            plt.tight_layout()
+            plt.show()
 
     def applyWarp(self, 
                   src_frame: Union[Img, RGB, HRC, WAC_RGB, MSC], 
@@ -2905,7 +2956,7 @@ class StereoTools:
                 wrp_frame.imgs[wrp_band_idx].refl_coeff = src_frame.imgs[i].refl_coeff
                 wrp_frame.imgs[wrp_band_idx].refl_offset = src_frame.imgs[i].refl_offset
                 wrp_frame.refl_coeffs[wrp_band_idx] = src_frame.imgs[i].refl_coeff
-                wrp_frame.refl_offset[wrp_band_idx] = src_frame.imgs[i].refl_offset
+                wrp_frame.refl_offsets[wrp_band_idx] = src_frame.imgs[i].refl_offset
                 wrp_frame.imgs[wrp_band_idx].reset_stretch_coefficient('all')
             
             # check that the filter ids of the destination are in the warp frame
@@ -2924,7 +2975,7 @@ class StereoTools:
                     wrp_frame.imgs[wrp_band_idx].refl_offset = dst_frame.imgs[i].refl_offset
                     wrp_frame.imgs[wrp_band_idx].reset_stretch_coefficient('all')
                     wrp_frame.refl_coeffs[wrp_band_idx] = dst_frame.imgs[i].refl_coeff
-                    wrp_frame.refl_offset[wrp_band_idx] = dst_frame.imgs[i].refl_offset
+                    wrp_frame.refl_offsets[wrp_band_idx] = dst_frame.imgs[i].refl_offset
             
             if src_frame.camera == 'LRWAC' and dst_frame.camera == 'HRC':
                 wrp_frame.camera = 'LRWHRC'
