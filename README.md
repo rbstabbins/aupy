@@ -94,6 +94,8 @@ project
 
 The notebook is setup to demonstrate processing of scene SOL2/sol2_8.
 
+When you open the notebook, you should be prompted to select a kernel for the notebook. Navigate to Python Environments, and you should see an option called 'aupy (Python 3.13.x...)'. Choose this kernel. If this isn't visible, try restarting Visual Studio Code - it may not have registered that you have setup your new conda environment.
+
 Please follow through the notebook, running it on your computer, to understand the steps of processing, and how the aupy library is called and used.
 
 Processed data is exported to a structured directory at ```processed```.
