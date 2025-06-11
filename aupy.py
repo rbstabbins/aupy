@@ -442,8 +442,8 @@ class CalibrationTarget:
         self.patch_ref_XYZ = self.load_patch_colours('XYZ')
         self.patch_ref_sRGB = self.load_patch_colours('sRGB')
         self.patch_names = list(CCS_COLOURCHECKERS[colour_checker].data.keys())
-        self.rows = CCS_COLOURCHECKERS[self.colour_checker].rows
-        self.cols = CCS_COLOURCHECKERS[self.colour_checker].columns
+        self.rows = CCS_COLOURCHECKERS[colour_checker].rows
+        self.cols = CCS_COLOURCHECKERS[colour_checker].columns
         self.patch_ref_refl = self.load_patch_spectra()
         # observed values
         self.target_outline = np.zeros((4,2))
@@ -738,7 +738,16 @@ class CalibrationTarget:
         width = np.abs(q[0][0] - q[3][0]).astype(np.int32)
         height = np.abs(q[0][1] - q[1][1]).astype(np.int32)
 
+        # let the minimum width be 5x number of columns, and height be 5x number of rows
+        width = max(width, 5 * self.cols)
+        height = max(height, 5 * self.rows)
+
         samples = int(np.floor(np.sqrt(0.25*(width * height)//24)))
+
+        # ensure samples is at least 3
+        if samples < 3:
+            samples = 3
+
         print(f"Target Width: {width} Height: {height}, Samples: {samples**2}")
         rectangle = as_int32_array([
                             [0, 0],
