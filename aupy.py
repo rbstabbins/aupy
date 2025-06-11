@@ -773,15 +773,17 @@ class CalibrationTarget:
             raise ValueError("Calibration target outline not set. " \
                                 "Please run find_calibration_target() first.")
         
+        bad_dn = 10 # set the max allowed patch average to X DN below the max value
+
         # if an image
         if isinstance(frame, Img):
             # get the values of the image
             observed_vals = self.get_observed_colours(frame.image)
             # get the upper limit of the patch values
             if frame.units == 'DN':
-                patch_max = 2**BIT_DEPTH - 1
+                patch_max = 2**BIT_DEPTH - bad_dn
             elif frame.units == 'DN/s':
-                patch_max = (2**BIT_DEPTH - 1) / frame.exposure
+                patch_max = (2**BIT_DEPTH - bad_dn) / frame.exposure
             elif frame.units == 'Reflectance':
                 patch_max = 1.0
             else:
@@ -798,11 +800,11 @@ class CalibrationTarget:
             observed_vals = self.get_observed_colours(frame.rgb_image)
             # get the upper limit of the patch values
             if frame.units == 'DN':
-                patch_max = np.array([2**BIT_DEPTH - 1] * 3)
+                patch_max = np.array([2**BIT_DEPTH - bad_dn] * 3)
             elif frame.units == 'DN/s':
-                red_patch_max = (2**BIT_DEPTH - 1) / frame.red.exposure
-                green_patch_max = (2**BIT_DEPTH - 1) / frame.green.exposure
-                blue_patch_max = (2**BIT_DEPTH - 1) / frame.blue.exposure
+                red_patch_max = (2**BIT_DEPTH - bad_dn) / frame.red.exposure
+                green_patch_max = (2**BIT_DEPTH - bad_dn) / frame.green.exposure
+                blue_patch_max = (2**BIT_DEPTH - bad_dn) / frame.blue.exposure
                 patch_max = np.array([red_patch_max,
                                         green_patch_max,
                                         blue_patch_max])   
@@ -822,9 +824,9 @@ class CalibrationTarget:
             observed_vals, observed_stds = self.get_observed_spectra(frame, method='mean')
             # get the upper limit of the patch values            
             if frame.units == 'DN':
-                patch_max = np.array([2**BIT_DEPTH - 1] * len(frame.imgs))
+                patch_max = np.array([2**BIT_DEPTH - bad_dn] * len(frame.imgs))
             elif frame.units == 'DN/s':
-                patch_max = np.array([(2**BIT_DEPTH - 1) / img.exposure for img in frame.imgs])
+                patch_max = np.array([(2**BIT_DEPTH - bad_dn) / img.exposure for img in frame.imgs])
             elif frame.units == 'Reflectance':
                 patch_max = np.array([1.0] * frame.n_bands)
             else:
@@ -905,6 +907,13 @@ class CalibrationTarget:
         reference_cols = reference_cols[mask]
 
         ccm = colour.matrix_colour_correction(observed_cols, reference_cols)
+
+        # check the diagnonals of the ccm are all >0
+        if not np.all(np.diag(ccm) > 0):
+            print("Colour Correction Matrix (CCM) has non-positive " \
+                             "diagonal elements. Replacing with identity matrix.")
+            ccm = np.eye(3)
+
         # apply the ccm to the reference values to get the corrected values
         cor_vals = colour.apply_matrix_colour_correction(observed_cols, ccm)
         # find the gamma curve                    
@@ -912,6 +921,10 @@ class CalibrationTarget:
                                 cor_vals.flatten(), 
                                 reference_cols.flatten(),
                                 p0=[1.0])
+        # check the fit is valid
+        if not np.isfinite(fit[0]) or fit[0] <= 0:
+            print(f"Invalid gamma fit: {fit[0]}")
+            fit[0] = 1.0
         self.ccm = ccm
         self.gamma = fit[0]
 
@@ -1882,6 +1895,8 @@ class RGB:
         srgb_image = gamma_curve(srgb_image, self.gamma)
         srgb_image = np.clip(srgb_image, 0.0, 1.0)
 
+        srgb_image = colour.cctf_encoding(srgb_image)
+
         return srgb_image
 
     def extract_balance_vector(self, 
@@ -2703,8 +2718,8 @@ class StereoTools:
         """
         self.src = src
         self.dst = dst
-        self.src_mask = np.zeros(self.src.shape[:2], dtype=np.uint8)
-        self.dst_mask = np.zeros(self.dst.shape[:2], dtype=np.uint8)
+        self.src_mask = np.ones(self.src.shape[:2], dtype=np.uint8)*255
+        self.dst_mask = np.ones(self.dst.shape[:2], dtype=np.uint8)*255
         self.pts_src = np.empty(1)
         self.pts_dst = np.empty(1)
         self.homography = np.zeros((3, 3))
@@ -2768,17 +2783,29 @@ class StereoTools:
         # Initiate SIFT detector
         sift = cv2.SIFT_create()
         
+        # histogram equalise using opencv the self.src image
+        src_yuv = cv2.cvtColor(self.src, cv2.COLOR_BGR2YUV)
+        dst_yuv = cv2.cvtColor(self.dst, cv2.COLOR_BGR2YUV)
+
+        # equalize the histogram of the Y channel
+        src_yuv[:,:,0] = cv2.equalizeHist(src_yuv[:,:,0])
+        dst_yuv[:,:,0] = cv2.equalizeHist(dst_yuv[:,:,0])
+
+        # convert the YUV image back to RGB format
+        src_eq = cv2.cvtColor(src_yuv, cv2.COLOR_YUV2BGR)
+        dst_eq = cv2.cvtColor(dst_yuv, cv2.COLOR_YUV2BGR)
+
         # find the keypoints and descriptors with SIFT
         try:
             # apply mask
-            src_img = cv2.bitwise_and(self.src, self.src, mask=self.src_mask)
+            src_img = cv2.bitwise_and(src_eq, src_eq, mask=self.src_mask)
             kp_src, des_src = sift.detectAndCompute(src_img, None)
         except cv2.error as e:
             print(f"Error in SIFT detection for source image: {e}")
             print("Try running cvtFrame2cv2() to convert the images to OpenCV format.")
             return
         try:
-            dst_img = cv2.bitwise_and(self.dst, self.dst, mask=self.dst_mask)
+            dst_img = cv2.bitwise_and(dst_eq, dst_eq, mask=self.dst_mask)
             kp_dst, des_dst = sift.detectAndCompute(dst_img,None)
         except cv2.error as e:
             print(f"Error in SIFT detection for destination image: {e}")
@@ -2792,14 +2819,14 @@ class StereoTools:
         # Apply ratio test
         good = []
         for m,n in matches:
-            if m.distance < 0.55*n.distance:
+            if m.distance < 0.75*n.distance:
                 good.append([m])
         
         if show:
             # cv.drawMatchesKnn expects list of lists as matches.
             img3 = cv2.drawMatchesKnn(
-                            cv2.cvtColor(self.src, cv2.COLOR_RGB2BGR), kp_src,
-                            cv2.cvtColor(self.dst, cv2.COLOR_RGB2BGR), kp_dst,
+                            cv2.cvtColor(src_eq, cv2.COLOR_RGB2BGR), kp_src,
+                            cv2.cvtColor(dst_eq, cv2.COLOR_RGB2BGR), kp_dst,
                             good,None,
                             flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
             
@@ -2810,7 +2837,7 @@ class StereoTools:
         pts_src = []
         pts_dst = []
         for i,(m,n) in enumerate(matches):
-            if m.distance < 0.55*n.distance:
+            if m.distance < 0.75*n.distance:
                 pts_dst.append(kp_dst[m.trainIdx].pt)
                 pts_src.append(kp_src[m.queryIdx].pt)
 
