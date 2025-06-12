@@ -1892,7 +1892,7 @@ class RGB:
         srgb_image = colour.apply_matrix_colour_correction(drgb_image, self.ccm)
         # apply the gamma correction
         srgb_image = np.clip(srgb_image, 0.0, None) # clamp negative vals to 0
-        srgb_image = gamma_curve(srgb_image, self.gamma)
+        # srgb_image = gamma_curve(srgb_image, self.gamma) # don't do gamma anymore - data is linear. Anyway, should be doing this correction before matrix application.
         srgb_image = np.clip(srgb_image, 0.0, 1.0)
 
         srgb_image = colour.cctf_encoding(srgb_image)
