@@ -23,7 +23,7 @@ If you're new to code editing, I recommend using VisualStudioCode to edit and ru
 [VisualStudioCode](https://code.visualstudio.com/).
 
 #### Downloading aupy
-Next, we need to download this github repository, that contains the codebase (aupy.py), the template notebooks for performing processing tasks, and a set of various calibration files that are need to perform calibration.
+Next, we need to download this github repository, that contains the codebase (aupy.py), the template notebooks for performing processing tasks, and a set of various calibration files that are needed to perform calibration.
 
 Setup a new folder on your computer for your AUPE processing project.
 
@@ -39,9 +39,9 @@ Unzip this into your project folder.
 
 Now we will get the code running.
 
-Open VSCode, and when prompted to open a folder, navigate to the aupy repository you just unzipped. This setups VSCode to work with this repository.
+Open VSCode, and when prompted to open a folder, navigate to the aupy repository you just unzipped. This sets up VSCode to work with this repository.
 
-We now need to setup a virtual environment for running the code in. In the repository there is an ```environment.yml`` file that gives a list of dependencies that need to be installed to run this code.
+We now need to setup a virtual environment for running the code in. In the repository there is an `environment.yml` file that gives a list of dependencies that need to be installed to run this code.
 
 We use ```conda``` to setup and manage this virtual environment.
 
@@ -175,33 +175,43 @@ The key parts are:
 
    Given a patch $p$ in the set of $n_p$ patches $P$, with continuous reflectance spectrum $R_p(\lambda)$, then the reference reflectance of $p$ when sampled by the filter $f$ in the set of $n_f$ filters $F$, with continuous transmission spectrum $T_f(\lambda)$, is:
 
-   $R_{ref}[f,p] = \frac{\int_{\lambda} R_p(\lambda) T_f(\lambda) d\lambda}{\int_{\lambda} T_f(\lambda) d\lambda}$
+   $$R_{ref}[f,p] = \frac{\int_{\lambda} R_p(\lambda) T_f(\lambda) d\lambda}{\int_{\lambda} T_f(\lambda) d\lambda}$$
 
-   giving us an $n_f \times n_p$ matrix $\bold{R}_{ref}$.
+   giving us an $n_f \times n_p$ matrix $\mathbf{R}_{ref}$.
 
-   Given an image $\bold{S}[f]$ through filter $f$ with units of DN, let the subset of pixels $\bold{i}_p$ (where $\bold{i} = (i,j)$) be the pixels that represent the patch $p$ in $\bold{S}_f$. Let $\bold{S_e}[f] = \bold{S}[f] / t_{exp}[f]$ be the exposure corrected image in units of DN/s.
+   Given an image $\bold{S}[f]$ through filter $f$ with units of DN, let the subset of pixels $\mathbf{i}_p$ (where $\mathbf{i} = (i,j)$) be the pixels that represent the patch $p$ in $\mathbf{S}_f$. Let $\mathbf{S_e}[f] = \mathbf{S}[f] / t_{exp}[f]$ be the exposure corrected image in units of DN/s.
    
-   Let the function $h({S_e}[f,\bold{i}_p])$ give the histogram of ${S_e}$ over $\bold{i}_p$. We define the average value of ${S_e}[f,p] \forall \bold{i} \in \bold{i}_p$ as the solution of the Levenberg-Marquardt nonlinear least-squares optimisation problem,
+   Let the function $h({S_e}[f,\mathbf{i}_p])$ give the histogram of ${S_e}$ over $\mathbf{i}_p$. We define the average value of ${S_e}[f,p] \forall \mathbf{i} \in \mathbf{i}_p$ as the solution of the Levenberg-Marquardt nonlinear least-squares optimisation problem,
 
-   $(\hat\mu, \hat\sigma) = \argmin_{\mu, \sigma}|h({S_e}[f,\bold{i}_p]) - g(S_e|\mu, \sigma)|^2$
+   $$(\hat\mu, \hat\sigma) = \underset{\mu,\sigma}{\operatorname{\argmin}}|h({S_e}[f,\bold{i}_p]) - g(S_e|\mu, \sigma)|^2$$
 
    as implemented in the `curve_fit` method of SciPy, where $g(S_e|\mu, \sigma)$ is the Gaussian function
 
-   $g(S_e|\mu, \sigma) = \frac{1}{\sigma\sqrt{2\pi}} \exp \left( -\frac{(S_e - \mu)^2}{2\sigma^2} \right)$
+   $$g(S_e|\mu, \sigma) = \frac{1}{\sigma\sqrt{2\pi}} \exp \left( -\frac{(S_e - \mu)^2}{2\sigma^2} \right)$$
 
    This gives the mean value of each $p\in P$ and each $f\in F$, to give the matrix $\hat S_e[f,p]$.
 
    For each $f \in F$, we find the line 
 
-   $R_{ref}[f,:] = r_m[f] \hat S_e[f,:] + r_c[f]$
+   $$\hat R_{ref}[f,:] = r_m[f] \hat S_e[f,:] + r_c[f]$$
 
    $\forall \;p \in P$.
 
-   We solve for $r_m, r_c$ via the linear least-squares optimisation problem,
+   by solving the linear least-squares optimisation problem for (r_m, r_c)
 
-   $(r_m, r_c) = \argmin_{r_m, r_c}\sum_{p\in P}|R_{ref}[p] - (r_m[f] \hat S_e[p] + r_c)|^2$   
+   $$(r_m, r_c) = \underset{r_m, r_c}{\operatorname{\argmin}}\sum_{p\in P}|R_{ref}[p] - (r_m[f] \hat S_e[p] + r_c)|^2$$ 
 
    Note that from this formulation, it's just a few steps more to implement uncertainty propagation through these fitting routines. This is on the To Do list for aupy.
+
+   For colour calibration, we take the subset of filters $f_{rgb}=(R,G,B) \in F$, and find the matrix $\mathbf{M}_{ccm}$ that maps $\hat R_{ref}[f_{rgb},p]$ to the $\text{sRGB}[f_{rgb},p]$ colour values of $p$, that are standardised for the Colour Checker target, and provided in the Colour Science library.
+
+   We solve the linear problem
+
+   $$\begin{bmatrix}\text{sRGB}[R,p]\\\text{sRGB}[G,p]\\\text{sRGB}[B,p]\end{bmatrix} = \begin{bmatrix}a&b&c\\d&e&f\\g&h&i\end{bmatrix} \begin{bmatrix}\hat R_{ref}[R,p]\\\hat R_{ref}[G,p]\\\hat R_{ref}[B,p]\end{bmatrix}$$
+
+   by inverting $\mathbf{M}_{ccm}$, via the polynomial method of [Cheung et al 2004](https://www.researchgate.net/publication/227522365_A_comparative_study_of_the_characterisation_of_color_cameras_by_means_of_neural_networks_and_polynomial_transforms).
+
+   After conversion to $\text{sRGB}$, we then apply the standard Gamma2.2 nonlinear encoding to the colour images.
 
    ![alt text](./example_images/image-6.png)|
    :---------------------------------------:|
