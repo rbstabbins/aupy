@@ -2,3 +2,5 @@ notebooks
 .vscode
 __pycache__
 ries_scene_complete_template_tester.ipynb
+data/.DS_Store
+.DS_Store
