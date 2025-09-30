@@ -4,22 +4,23 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - conda-forge::python
-  - conda-forge::ipykernel
-  - conda-forge::ipython
-  - conda-forge::matplotlib
-  - conda-forge::numpy
-  - conda-forge::pandas
-  - conda-forge::pillow
-  - conda-forge::pip
-  - conda-forge::scipy
-  - conda-forge::seaborn
+  - python
+  - ipykernel
+  - ipython
+  - matplotlib
+  - numpy
+  - pandas
+  - pillow
+  - pip
+  - scipy
+  - seaborn
   - conda-forge::spectral=0.24
-  - click=8.1.8
+  - click
   - conda-forge::colour-science
   - conda-forge::colour-checker-detection=0.2.1
   - conda-forge::ultralytics=8.3.133
   - conda-forge::qtpy=2.4.3
   - anaconda::pyqt
+  - libtheora=1.1.1
   - pip:
       - roipoly==0.5.3
