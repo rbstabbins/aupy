@@ -1,24 +1,24 @@
 name: aupy_dev
 channels:
+  - anaconda
   - conda-forge
   - defaults
 dependencies:
+  - conda-forge::python
+  - conda-forge::ipykernel
+  - conda-forge::ipython
+  - conda-forge::matplotlib
+  - conda-forge::numpy
+  - conda-forge::pandas
+  - conda-forge::pillow
+  - conda-forge::scipy
+  - conda-forge::seaborn
+  - conda-forge::spectral=0.24
   - click=8.1.8
-  - colour-science
-  - ipykernel=6.29.5
-  - ipython=9.2.0
-  - matplotlib=3.10.1
-  - numpy=2.2.5
-  - opencv=4.11.0
-  - pandas=2.2.3
-  - pillow=11.2.1
-  - pip=25.1.1
-  - qtpy=2.4.3
-  - scipy=1.15.2
+  - conda-forge::colour-science
+  - conda-forge::colour-checker-detection=0.2.1
+  - conda-forge::ultralytics=8.3.133
+  - conda-forge::qtpy=2.4.3
+  - anaconda::pyqt
   - pip:
-      - colour-checker-detection==0.2.1
-      - pyqt5==5.15.11
       - roipoly==0.5.3
-      - seaborn==0.13.2
-      - spectral==0.24
-      - ultralytics==8.3.133
