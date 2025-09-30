@@ -11,6 +11,7 @@ dependencies:
   - conda-forge::numpy
   - conda-forge::pandas
   - conda-forge::pillow
+  - conda-forge::pip
   - conda-forge::scipy
   - conda-forge::seaborn
   - conda-forge::spectral=0.24
