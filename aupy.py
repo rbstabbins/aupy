@@ -637,7 +637,7 @@ class CalibrationTarget:
             return False
     
         default_backend = mpl.get_backend()
-        mpl.use('Qt5Agg')  # need this backend for RoiPoly to work 
+        mpl.use('QtAgg')  # need this backend for RoiPoly to work 
         fig = plt.figure(figsize=(10,10), dpi=80)
 
         plt.imshow(ct_img, origin='upper')
