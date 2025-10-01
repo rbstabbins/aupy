@@ -2,11 +2,11 @@
 
 ![AUPE Reflectance and Colour Calibration](./example_images/cover_thumb.jpg)
 
-## Update - PanCam GTM Branch 1/10/2025 <a name = "update"></a>
+## Update - PanCam TM Branch 1/10/2025 <a name = "update"></a>
 
-This branch extends aupy to handle data from the PanCam Ground Test Model.
+This branch extends aupy to handle data from the PanCam Training Model (TM).
 
-The functionality is the same as below, but the code and directory structures have been generalised to handle the two different camera systems, AUPE and the PanCam GTM, and also the PanCam Calibration Target, that will be used during the ExoMars mission that this work is in preparation for.
+The functionality is the same as below, but the code and directory structures have been generalised to handle the two different camera systems, AUPE and the PanCam TM, and also the PanCam Calibration Target, that will be used during the ExoMars mission that this work is in preparation for.
 
 ## About <a name = "about"></a>
 
