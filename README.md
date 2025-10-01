@@ -2,6 +2,12 @@
 
 ![AUPE Reflectance and Colour Calibration](./example_images/cover_thumb.jpg)
 
+## Update - PanCam GTM Branch 1/10/2025 <a name = "update"></a>
+
+This branch extends aupy to handle data from the PanCam Ground Test Model.
+
+The functionality is the same as below, but the code and directory structures have been generalised to handle the two different camera systems, AUPE and the PanCam GTM, and also the PanCam Calibration Target, that will be used during the ExoMars mission that this work is in preparation for.
+
 ## About <a name = "about"></a>
 
 This is a Python toolkit for processing AUPE ([Aberystwyth University PanCam Emulator](https://exomars.wales/facilities/aupe/)) images into colour and reflectance products, through calibration against in-scene images of the MacBeth/Gretag/ColorRite Colour Checker 24-patch colour calibration target.
