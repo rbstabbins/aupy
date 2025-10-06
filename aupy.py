@@ -82,6 +82,7 @@ def gauss(x: NDArray, a: float, x0: float, sigma: float) -> NDArray:
     :rtype: NDArray
     """        
     return a*np.exp(-(x-x0)**2/(2*sigma**2))
+
 class AupeInfo:
     """A class to hold the AUPE information for a given dataset, that is not
     included in the image metadata. This includes the filter positions, 
@@ -191,20 +192,14 @@ class AupeInfo:
             elif frame_type == 'MSC':
                 filter_ids = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06']
 
-        elif camera == 'RWAC':
+        elif camera == 'WAC':
             if frame_type == 'RGB':
                 filter_ids = ['R1R', 'R2G', 'R3B']
             elif frame_type == 'MSC':
-                filter_ids = ['G07', 'G08', 'G09', 'G10', 'G11', 'G12']
+                filter_ids = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06', 'G07', 'G08', 'G09', 'G10', 'G11', 'G12']
 
-        # 'virtual' camera - holds LWAC->warped-2-RWAC images
-        elif camera == 'LRWAC':
-            if frame_type == 'MSC':
-                filter_ids = ['G01', 'G02', 'G03', 'G04', 'G05', 'G06',
-                              'G07', 'G08', 'G09', 'G10', 'G11', 'G12']
-                
-        # 'virtual' camera - holds LRWAC->warped-2-HRC images
-        elif camera == 'LRWHRC':
+        # 'virtual' camera - holds WAC->warped-2-HRC images
+        elif camera == 'WACHRC':
             if frame_type == 'MSC':
                 filter_ids = [
                             'H1R', 'H2G', 'H3B',
@@ -230,7 +225,7 @@ class AupeIO:
     'data' subdirectory next to the aupy.py module.    
     '''
     def __init__(self, 
-                 camera: Literal['HRC', 'LWAC', 'RWAC'],
+                 camera: Literal['HRC', 'WAC'],
                  frame_type: Literal['Single', 'RGB', 'MSC'],
                  sol: str,
                  scene: str, 
@@ -341,7 +336,7 @@ class AupeIO:
                                             self.aupe_info)
                 frame.debayer()
                 return frame
-            elif self.camera == 'LWAC' or self.camera == 'RWAC':
+            elif self.camera == 'WAC':
                 frame = WAC_RGB.from_filedicts((input_file_dicts[0],
                                                 input_file_dicts[1],
                                                 input_file_dicts[2],), 
@@ -349,7 +344,7 @@ class AupeIO:
                 return frame
         
         elif self.frame_type == 'MSC':
-            if self.camera == 'LWAC' or self.camera == 'RWAC' or self.camera == 'LRWAC' or self.camera == 'LRWHRC':
+            if self.camera == 'WAC' or self.camera == 'WACHRC':
                 # create a WAC MSC frame                
                 frame = MSC.from_filedicts(input_file_dicts, self.aupe_info)
                 return frame
@@ -1362,17 +1357,24 @@ class Img:
         
         self.out_dir = file_dict['out_dir']
 
-        self.channel = self.filename.split('_')[3]
+        parts = self.filepath.stem.split('_')
+        self.channel = parts[2].split('-')[-1]
+
         # from metadata
         # read the metadata from the image file using the PIL exif reader
         img = Image.open(self.filepath)
         metadata = img.info
 
-        self.pan = float(metadata['AU_pan'])
-        self.tilt = float(metadata['AU_tilt'])
-        self.exposure = float(metadata['AU_exposureTime'])
-        self.timestamp = metadata['AU_timestampUTC']        
-        self.camera = aupe_info.cam_dict[int(metadata['AU_camNum'])]
+        self.pan = 0.0 # no metadata given
+        self.tilt = 0.0 # no metadata given
+        
+        if parts[4][-2] == 'm':
+            self.exposure = float(parts[4].split('ms')[0])/1000
+        else:
+            self.exposure = float(parts[4].split('s')[0])
+
+        self.timestamp = ('_').join([parts[0], parts[1]])
+        self.camera = 'WAC' # Not in the metadta, not always in the filename. Fix to WAC for now, update later to handle HRC. aupe_info.cam_dict[int(metadata['AU_camNum'])]
 
         # from image
         # read the image data
@@ -1961,14 +1963,16 @@ class RGB:
             # zoom in on the colorchecker target
             title = 'Select Calibration Target Approx. ROI'
             print('First draw an ROI around the calibration target')
-            ct_roi = cv2.selectROI(title, cv2.cvtColor(self.rgb_image, cv2.COLOR_RGB2BGR))
+            # make a copy of the rgb image scaled to 0-255 for display
+            disp_img = (self.rgb_image * 255).astype(np.uint8)
+            ct_roi = cv2.selectROI(title, cv2.cvtColor(disp_img, cv2.COLOR_RGB2BGR))
             # switch order of roi to (y, x, h, w)
             ct_roi = (ct_roi[1], ct_roi[0], ct_roi[3], ct_roi[2])           
             cv2.destroyWindow(title)             
             # get the white patch value
             title = 'Select White Patch ROI'
             print('Now draw an ROI around the white patch on the calibration target')
-            ct_img = self.rgb_image[ct_roi[0]:ct_roi[0]+ct_roi[2], ct_roi[1]:ct_roi[1]+ct_roi[3]]
+            ct_img = disp_img[ct_roi[0]:ct_roi[0]+ct_roi[2], ct_roi[1]:ct_roi[1]+ct_roi[3]]
             wp_roi = cv2.selectROI(title, cv2.cvtColor(ct_img, cv2.COLOR_RGB2BGR))
             # switch order of roi to (y, x, h, w)
             wp_roi = (wp_roi[1], wp_roi[0], wp_roi[3], wp_roi[2])           

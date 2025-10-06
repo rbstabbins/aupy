@@ -1,0 +1,8 @@
+﻿PanCam TM HRC Filter LUT,,,
+version,0.1,,
+date,20251006,,
+filter_pos,filter_id,cwl,fwhm
+HRC00,HR0,550,100
+HRCR,H1R,617,84
+HRCG,H2G,557,83
+HRCB,H3B,522,178

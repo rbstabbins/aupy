@@ -1,0 +1,8 @@
+﻿PanCam TM RGB Filter LUT,,,
+version,0.1,,
+date,20251006,,
+filter_pos,filter_id,cwl,fwhm
+R01,R1R,639,99
+R02,R2G,543,79
+R03,R3B,459,80
+R08,R8U,459,80
