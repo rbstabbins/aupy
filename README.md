@@ -4,7 +4,24 @@
 
 ## About <a name = "about"></a>
 
-This is a Python toolkit for processing AUPE ([Aberystwyth University PanCam Emulator](https://exomars.wales/facilities/aupe/)) images into colour and reflectance products, through calibration against in-scene images of the MacBeth/Gretag/ColorRite Colour Checker 24-patch colour calibration target.
+This is a Python toolkit for processing AUPE ([Aberystwyth University PanCam Emulator](https://exomars.wales/facilities/aupe/)) images into colour and reflectance products.
+
+This branch is specifically for processing of AUPE images during the ExoMars SKP Field Trials #1.
+
+The original aupy was specifically for processing field test images with the MacBeth Colorchecker (MBCC) in the scene.
+
+For the field trials we are using a mock-up of the PanCam Calibration Target, which needs a different method for reading the patch values.
+
+For the field trials, we are also working with different directory structures, file-naming conventions, and metadata.
+
+So the key changes for this code are:
+
+1. SKP-FT1 specific directory preparation tools, for rearranging files in to directories grouped by scene, and renaming files from ROCC convention to AUPE write convention.
+2. Quick-look RGB colour output tools
+
+As of writing this, I have a method that works for batch processing, but I don't really have the development time to re-write this whole document.
+
+
 
 Raw 8-bit png files, output by AUPE, are read and processed into reflectance units, and collected into multispectral cubes and exported to ENVI hdr/img format files, for analysis via standard spectral imaging software (e.g. [ENVI](https://www.nv5geospatialsoftware.com/docs/ProgrammingGuideIntroduction.html), [SpectralPython](https://www.spectralpython.net/), [WISER](https://ehlmann.caltech.edu/wiser/index.html)), or via the bespoke PanCam Operations Toolkit, [PCOT](https://pcot.aber.ac.uk/).
 

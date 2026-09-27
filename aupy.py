@@ -104,6 +104,7 @@ class ROCCIMG:
         self.sol = f"{int(self.meta_dict['sol']):02d}"
         self.task_id = f"{int(self.meta_dict['task_id']):02d}"
         self.run_num = f"{int(self.meta_dict['task_run_num']):02d}"
+        self.action_id = self.task_id + '_' + self.run_num
         # pad tilt as ±00.00 and pan as ±000.00
         self.tilt = f"{float(self.meta_dict['tilt']):0=+z6.2f}"
         self.pan = f"{float(self.meta_dict['pan']):0=+z7.2f}"
@@ -113,8 +114,9 @@ class ROCCIMG:
         # # if Tilt does not lead with '-', add '+'
         # if not self.tilt.startswith('-'):
         #     self.tilt = '+' + self.tilt
-        self.run_id = self.run_num + f'_T{self.tilt}' + f'_P{self.pan}'
+        self.ptu_id = f'_T{self.tilt}' + f'_P{self.pan}'
 
+        self.out_sol_dir = self.pr_dir / ('sol'+self.sol) / 'aupy'
         self.out_dir = self.set_out_dirtree()
         self.png_out_filename = self.set_out_filename()
         self.xml_out_filename = self.png_out_filename + '.xml'
@@ -128,16 +130,13 @@ class ROCCIMG:
         :rtype: _type_
         """        
         
-        # Create the directory tree for the output based on the metadata dictionary and data directory
-        # pr_dir.mkdir(parents=True, exist_ok=True)
-        sol_dir = self.pr_dir / ('sol'+self.meta_dict['sol']) / 'aupy'
-        # sol_dir.mkdir(parents=True, exist_ok=True)
-        
         # parse task_id to int and then 3-digit padded 0 string
-        task_id_dir = sol_dir / (('sol'+self.meta_dict['sol']) + ('_' + self.task_id))
+        task_id_dir = self.out_sol_dir / (('sol'+self.meta_dict['sol']) + ('_' + self.action_id))
 
         # parse task_run_num to int and then 3-digit padded 0 string
-        task_run_num_dir = task_id_dir / (('sol'+self.meta_dict['sol']) + ('_' + self.task_id) + ('_'+self.run_id))
+        task_run_num_dir = task_id_dir / (('sol'+self.meta_dict['sol']) + ('_' + self.action_id) + self.ptu_id)
+        # put all data in 'raw' directory, to aide downstream aupy processing
+        task_run_num_dir = task_run_num_dir / 'raw'
         task_run_num_dir.mkdir(parents=True, exist_ok=True)
 
         return task_run_num_dir
@@ -205,7 +204,7 @@ class ROCCDownlinkDirTool:
             if xml_file.exists():
                 png_xml_pairs.append((png_file, xml_file))
             else:
-                print(f"Warning: XML file not found for {png_file.stem}. Dropping this file from processing")            
+                print(f"Warning: XML file not found for {png_file.name}. Dropping this file from processing")            
 
         return png_xml_pairs
 
@@ -214,22 +213,24 @@ class ROCCDownlinkDirTool:
         processing directory"""
 
         new_png_xml_pairs = []
+        out_sol_dir = ''
         for png_file, xml_file in png_xml_pairs:
             pancam_img = ROCCIMG(png_file, xml_file, self.pr_dir)
+            out_sol_dir = pancam_img.out_sol_dir
             new_png, new_xml = pancam_img.run_file_rename()
             new_png_xml_pairs.append((new_png, new_xml))
 
-        return new_png_xml_pairs
+        return new_png_xml_pairs, out_sol_dir
 
-    def organise(self) -> List[Path]:
+    def organise(self) -> Tuple[List[Path], Path]:
         """Create the new organised and relablled directory tree"""
 
         dl_dirs = self.get_downlinked_dirs()
         pngs = self.get_all_pancam_pngs(self.sol_dir, dl_dirs)
         png_xml_pairs = self.get_png_xmls(pngs)
-        new_png_xml_pairs = self.build_new_proc_dir(png_xml_pairs)
+        new_png_xml_pairs, out_sol_dir = self.build_new_proc_dir(png_xml_pairs)
 
-        return new_png_xml_pairs
+        return new_png_xml_pairs, out_sol_dir
     
 # Convenience XML reader
 
@@ -408,9 +409,6 @@ class AupeIO:
                  camera: Literal['HRC', 'LWAC', 'RWAC'],
                  frame_type: Literal['Single', 'RGB', 'MSC'],
                  scene_dir: str,
-                 sol: str,
-                 scene: Literal['predrive', 'postdrive']|str, # co-opt the scene variable as 'drive-stage: pre, post, etc'
-                 trial: str='', # co-opt the trial variable as 'target_id'
                  filter_ids: Optional[List[str]]=None,
                  aupe_info_path: Path=Path('.','data','aupe_skp_info.csv')) -> None:
         """
@@ -436,18 +434,21 @@ class AupeIO:
         """
         self.camera = camera
         self.frame_type = frame_type
-        self.sol = sol
-        self.scene = scene
-        self.trial = trial
 
-        self.scene_dir = Path(scene_dir, trial)
+        self.scene_dir = Path(scene_dir, 'raw')
 
-        self.out_dir = Path(self.scene_dir,
+        self.out_dir = Path(self.scene_dir, '..',
                                 self.camera,
                                 self.frame_type)
-        
-        self.out_dir.mkdir(parents=True, exist_ok=True)
+                
         self.aupe_info = AupeInfo(aupe_info_path)
+
+        # get values to assign 'sol' 'scene' and 'trial' from scene_dir.
+        scene_parts = Path(scene_dir).name.split('_')
+
+        self.sol = scene_parts[0]
+        self.scene = scene_parts[1] + '_' + scene_parts[2]
+        self.trial = scene_parts[3] + '_' + scene_parts[4]
 
         # set the list of filters to load for given camera and frame type
         if filter_ids is not None and filter_ids[0] != '':
@@ -468,11 +469,19 @@ class AupeIO:
         # find the image filepaths to load into the frame
         self.input_files = []
         png_files = list(self.scene_dir.glob("*.png"))
+
         for filter_pos in self.filter_pos: # note order preserved
             # get the files that match the filter pos code
             files = [path for path in png_files if filter_pos+'_' in path.name]
             # add the files to the input files list
             self.input_files += files
+
+        if len(self.input_files) == 0:
+            print(f"No input files found for scene: {self.scene_dir}")
+        elif frame_type == 'RGB' and len(self.input_files) != 3:
+            raise ValueError(f"RGB frame type requires exactly 3 input files, found {len(self.input_files)}. Consider looking in {self.scene_dir} for erroneously arranged/tagged scene images")
+        else:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
 
     def load_frame(self) -> Union[None, 'Img', 'HRC', 'WAC_RGB', 'RGB', 'MSC']:
         """Load the frame from the input files, and return the frame object.
@@ -1529,7 +1538,7 @@ class Img:
         img = Image.open(self.filepath)
 
         self.xmlpath = self.filepath.parent / f"{self.filepath.name}.xml"
-        metadata = self.load_xml_metadata()
+        metadata = load_xml_metadata(self.xmlpath)
 
         self.pan = float(metadata['pan'])
         self.tilt = float(metadata['tilt'])
@@ -1842,7 +1851,8 @@ class Img:
         return image
 
     def show_image(self, 
-                   stretch_method: Literal['raw', 'smt', 'bps', 'wps', '99s']='raw'
+                   stretch_method: Literal['raw', 'smt', 'bps', 'wps', '99s']='raw',
+                   apply_gamma: bool=False,
                 ) -> Tuple[plt.Figure, plt.Axes]:
         """Display the image using matplotlib,
         and optionally show the histogram of the image data.
@@ -1851,6 +1861,9 @@ class Img:
         title = f"{self.sol} {self.scene} {self.trial} {self.channel} {self.filter_id} {self.cwl}±{int(self.fwhm/2)} nm ({stretch_method})"
 
         disp_img = self.get_image(stretch_method) # image is always in range of 0 - 1
+        
+        if apply_gamma:
+            disp_img = colour.cctf_encoding(disp_img)
         
         plt.style.use('default')
         fig, ax = plt.subplots(1,2, figsize=(8, 4))
@@ -1913,7 +1926,7 @@ class Img:
         out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / title
         plt.imsave(
-            str(out_file.absolute()), 
+            str(out_file.resolve()), 
             out_img, 
             vmin=0, vmax=255, cmap='gray', 
             format='png', 
@@ -2063,6 +2076,10 @@ class RGB:
         if self.ccm is None:
             print("No colour correction matrix set")
             # search for the latest calibration target in the 
+
+        # normalise to the brightest pixel in the green channel
+
+
         srgb_image = colour.apply_matrix_colour_correction(drgb_image, self.ccm)
         # apply the gamma correction
         srgb_image = np.clip(srgb_image, 0.0, None) # clamp negative vals to 0
@@ -2237,7 +2254,8 @@ class RGB:
         return image
 
     def show_image(self, 
-                   colour_correction: Literal['raw', 'smt', 'bpb', 'bpu', 'wps', '99b','99u', 'ccm']='raw'):
+                   colour_correction: Literal['raw', 'smt', 'bpb', 'bpu', 'wps', '99b','99u', 'ccm']='raw',
+                   apply_gamma: bool=True):
         """Display the RGB image using matplotlib,
         and optionally show the histogram of the image data.
         """
@@ -2246,7 +2264,8 @@ class RGB:
         disp_img = self.get_image(colour_correction)
         
         # # apply encoding
-        # disp_img = colour.cctf_encoding(disp_img)
+        if apply_gamma:
+            disp_img = colour.cctf_encoding(disp_img)
 
         plt.style.use('default')
         fig, ax = plt.subplots(1,2, figsize=(8, 4))  
@@ -2268,7 +2287,7 @@ class RGB:
 
     def export_image(self, 
                      colour_correction: Literal['raw', 'bpb', 'bpu', 'wps', '99b','99u', 'ccm']='raw',
-                     gamma: float=1.0,
+                     apply_gamma: bool=False,
                      show: bool=False) -> Path:
         """Export the image to an 8-bit RGB image file, using the stretch method
 
@@ -2293,6 +2312,8 @@ class RGB:
         if colour_correction == 'ccm':
             # apply the colour correction matrix
             disp_img = self.get_image('ccm')
+            if apply_gamma:
+                disp_img = colour.cctf_encoding(disp_img)
             # convert to uint8
             disp_img = (disp_img * 255).astype(np.uint8)
         else:
@@ -2300,7 +2321,8 @@ class RGB:
                 self.extract_balance_vector(colour_correction)
             disp_img = np.clip(self.apply_balance_vector(colour_correction), 0.0, 1.0)  
             # apply gamma correction
-            disp_img = np.power(disp_img, 1.0/gamma)
+            if apply_gamma:
+                disp_img = colour.cctf_encoding(disp_img)
             # convert to uint8
             disp_img = (disp_img * 255).astype(np.uint8)
 
