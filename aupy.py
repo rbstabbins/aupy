@@ -1,9 +1,12 @@
 # A Python library for processing and analysing images from the
 # Aberystwyth University PanCam Emulator, AUPE.
 #
+# Edited for the ExoMars SKP Field Trials
+#
 # Roger Stabbins
 # Natural History Museum, London
-# 9/5/2025
+# 9/5/2025 v1
+# 269/2026 v2
 
 from pathlib import Path
 from typing import Dict, List, Literal, Tuple, Union, Optional
@@ -28,6 +31,7 @@ from colour_checker_detection.detection.common import sample_colour_checker, as_
 
 STRETCH_DICT = {
     'raw': 'raw image no stretch',
+    'smt': 'saturattion over minimum exposure time', # pre-colour correction normalisation
     'bps': 'brightest pixel stretch', # for individual channels/bands/frames
     'bpb': 'brightest pixel balanced', # each channel/band/frame is bps stretched independently
     'bpu': 'brightest pixel unbalanced', # channel proportions are maintained whilst stretching brightest pixel across all channels
@@ -82,6 +86,23 @@ def gauss(x: NDArray, a: float, x0: float, sigma: float) -> NDArray:
     :rtype: NDArray
     """        
     return a*np.exp(-(x-x0)**2/(2*sigma**2))
+
+# Convenience XML reader
+
+def load_xml_metadata(xml_path: Path):
+    """Load metadata from the corresponding XML file
+    
+    Credit to Harry Marsh for xml reader code."""
+
+    #find and breakdown the important xml bits
+    attrs = pd.read_xml(xml_path, xpath=".//attribute", parser = "etree")
+    meta = attrs.loc[attrs["name"] == "ImageMetadata", "value"].iloc[0]
+    parts = meta.split("|")
+    # put every other item into a dictionary
+    meta_dict = {parts[i]: parts[i + 1] for i in range(0, len(parts), 2)}
+    
+    return meta_dict
+
 class AupeInfo:
     """A class to hold the AUPE information for a given dataset, that is not
     included in the image metadata. This includes the filter positions, 
@@ -232,12 +253,12 @@ class AupeIO:
     def __init__(self, 
                  camera: Literal['HRC', 'LWAC', 'RWAC'],
                  frame_type: Literal['Single', 'RGB', 'MSC'],
+                 scene_dir: str,
                  sol: str,
-                 scene: str, 
-                 trial: str='',
+                 scene: Literal['predrive', 'postdrive']|str, # co-opt the scene variable as 'drive-stage: pre, post, etc'
+                 trial: str='', # co-opt the trial variable as 'target_id'
                  filter_ids: Optional[List[str]]=None,
-                 campaign_dir: Path=Path('..','data'),
-                 aupe_info_path: Path=Path('.','data','aupe_info.csv')) -> None:
+                 aupe_info_path: Path=Path('.','data','aupe_skp_info.csv')) -> None:
         """
         :param camera: Camera to load the image from
         :type camera: Literal['HRC', 'LWAC', 'RWAC']
@@ -255,37 +276,22 @@ class AupeIO:
         :param campaign_dir: Directory holding the campaign data, 
             defaults to Path('..','data')
         :type campaign_dir: Path
-        :param aupe_info_path: Path to the aupe_info.csv file, 
-            defaults to Path('.','data','aupe_info.csv')
+        :param aupe_info_path: Path to the aupe_skp_info.csv file, 
+            defaults to Path('.','data','aupe_skp_info.csv')
         :type aupe_info_path: Path
         """
         self.camera = camera
         self.frame_type = frame_type
         self.sol = sol
         self.scene = scene
-        self.campaign_dir = campaign_dir
-
-        # handle the case where trial is not in input directory
-        if trial != '':
-            self.scene_dir = Path(campaign_dir, sol, scene, trial)
-        else:
-            self.scene_dir = Path(campaign_dir, sol, scene)
-            trial = 'Trial1'
         self.trial = trial
 
-        if not self.campaign_dir.exists():
-            raise FileNotFoundError(f"{self.campaign_dir} does not exist")
-        if not self.scene_dir.exists():
-            raise FileNotFoundError(f"{self.scene_dir} does not exist")
+        self.scene_dir = Path(scene_dir, trial)
 
-        self.out_dir = Path(self.campaign_dir,
-                                '..', 
-                                'processed',
-                                self.sol,
-                                self.scene,
-                                self.trial,
+        self.out_dir = Path(self.scene_dir,
                                 self.camera,
                                 self.frame_type)
+        
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.aupe_info = AupeInfo(aupe_info_path)
 
@@ -916,19 +922,20 @@ class CalibrationTarget:
 
         # apply the ccm to the reference values to get the corrected values
         cor_vals = colour.apply_matrix_colour_correction(observed_cols, ccm)
-        # find the gamma curve                    
-        fit, covar = curve_fit(gamma_curve, 
-                                cor_vals.flatten(), 
-                                reference_cols.flatten(),
-                                p0=[1.0])
-        # check the fit is valid
-        if not np.isfinite(fit[0]) or fit[0] <= 0:
-            print(f"Invalid gamma fit: {fit[0]}")
-            fit[0] = 1.0
-        self.ccm = ccm
-        self.gamma = fit[0]
 
-        return ccm, fit[0]
+        # # find the gamma curve                    
+        # fit, covar = curve_fit(gamma_curve, 
+        #                         cor_vals.flatten(), 
+        #                         reference_cols.flatten(),
+        #                         p0=[1.0])
+        # # check the fit is valid
+        # if not np.isfinite(fit[0]) or fit[0] <= 0:
+        #     print(f"Invalid gamma fit: {fit[0]}")
+        #     fit[0] = 1.0
+        self.ccm = ccm
+        # self.gamma = fit[0]
+
+        return ccm #, fit[0]
 
     def calibrate_colour(self, 
                 frame: Union['RGB', 'WAC_RGB', 'HRC'],                 
@@ -949,7 +956,7 @@ class CalibrationTarget:
                 "Please run find_target_outline(frame) or draw_target_outline(frame) first.")    
         
         if frame.units != 'Reflectance':
-            drgb_image = frame.get_image('bpu') # get vals from raw image            
+            drgb_image = frame.get_image('smt') # get vals from raw image            
             obs_ct_dRGB_vals = self.get_observed_colours(drgb_image, show=show)
             # get the reference values
             ref_ct_sRGB_vals = self.patch_ref_sRGB
@@ -970,9 +977,9 @@ class CalibrationTarget:
             obs_masked[bad_patch_mask] = np.nan
             ref_masked[bad_patch_mask] = np.nan
 
-            ccm, gamma = self.compute_ccm(obs_masked, ref_masked)
+            ccm = self.compute_ccm(obs_masked, ref_masked)
             frame.ccm = ccm
-            frame.gamma = gamma
+            frame.gamma = 2.2
         else:
             # get the observed values from the reflectance values
             refl_image = frame.rgb_image
@@ -995,11 +1002,11 @@ class CalibrationTarget:
             obs_masked[bad_patch_mask] = np.nan
             ref_masked[bad_patch_mask] = np.nan
 
-            ccm, gamma = self.compute_ccm(obs_masked, ref_masked)
+            ccm = self.compute_ccm(obs_masked, ref_masked)
             
             # set the ccm and gamma on the frame
             frame.ccm = ccm
-            frame.gamma=gamma # leave gamma as linear, as we expect the reflectance units to be linear.
+            frame.gamma=2.2 # leave gamma as linear, as we expect the reflectance units to be linear.
 
         if show:
             # apply the ccm to the observed calibration target and compare
@@ -1362,17 +1369,19 @@ class Img:
         
         self.out_dir = file_dict['out_dir']
 
-        self.channel = self.filename.split('_')[3]
+        self.channel = self.filename.split('_')[4]
         # from metadata
         # read the metadata from the image file using the PIL exif reader
         img = Image.open(self.filepath)
-        metadata = img.info
 
-        self.pan = float(metadata['AU_pan'])
-        self.tilt = float(metadata['AU_tilt'])
-        self.exposure = float(metadata['AU_exposureTime'])
-        self.timestamp = metadata['AU_timestampUTC']        
-        self.camera = aupe_info.cam_dict[int(metadata['AU_camNum'])]
+        self.xmlpath = self.filepath.parent / f"{self.filepath.name}.xml"
+        metadata = self.load_xml_metadata()
+
+        self.pan = float(metadata['pan'])
+        self.tilt = float(metadata['tilt'])
+        self.exposure = float(metadata['exposure_time'])
+        self.timestamp = metadata['au_timestamp']        
+        self.camera = aupe_info.cam_dict[int(metadata['cam_num'])]
 
         # from image
         # read the image data
@@ -1413,7 +1422,8 @@ class Img:
 
         self.refl_coeff = None  # reflectance correction coefficient
         self.refl_offset = None  # reflectance correction offset
-            
+
+
     def load_filter_response(self) -> Dict:
         """Method to load the filter transmission data for the filter id 
         of the Img
@@ -1483,7 +1493,7 @@ class Img:
         pass
 
     def extract_stretch_coefficient(self, 
-                method: Literal['raw', 'bps', 'wps', '99s']='raw',
+                method: Literal['raw', 'smt', 'bps', 'wps', '99s']='raw',
                 wp_roi: Tuple[int, int, int, int]=None) -> float:
         """Get the stretch coefficient for the given image according to
         the selected method.
@@ -1496,7 +1506,7 @@ class Img:
         MacBeth colorchecker has a value of 1.0.
 
         :param method: method for finding the stretch coefficient
-        :type method: Literal['raw', 'bps', 'wps', '99s']
+        :type method: Literal['raw', 'smt', 'bps', 'wps', '99s']
         """      
         if method == 'raw':
             # set the stretch coefficient to 1.0 / max bit-depth value
@@ -1574,6 +1584,10 @@ class Img:
                     'factor':  None,
                     'roi': [None, None, None, None]
                 },
+                'smt': {
+                    'factor': None,
+                    'roi': [None, None, None, None]
+                },
                 'bps': {
                     'factor': None,
                     'roi': [None, None, None, None]
@@ -1589,6 +1603,11 @@ class Img:
             }
         elif method == 'raw':
             self.stretch['raw'] = {
+                'factor': None,
+                'roi': [None, None, None, None]
+            }
+        elif method == 'smt':
+            self.stretch['smt'] = {
                 'factor': None,
                 'roi': [None, None, None, None]
             }
@@ -1610,12 +1629,12 @@ class Img:
         else:
             raise ValueError(f"Unknown stretch method: {method}")
 
-    def apply_stretch(self, stretch_method: Literal['raw', 'bps', 'wps', '99s']='raw'):
+    def apply_stretch(self, stretch_method: Literal['raw', 'smt', 'bps', 'wps', '99s']='raw'):
         """Apply the stretch coefficient to the image, and return the stretched image.
         Stretched iamge is always in the range of 0.0 to 1.0.
 
         :param stretch_method: method for finding the stretch coefficient
-        :type stretch_method: Literal['raw', 'bps', 'wps', '99s']
+        :type stretch_method: Literal['raw', 'smt', 'bps', 'wps', '99s']
         :return: stretched image
         :rtype: np.ndarray
         """
@@ -1653,12 +1672,12 @@ class Img:
                              "Please set them before applying the reflectance calibration.")
 
     def get_image(self, 
-                stretch_method: Literal[None, 'raw', 'bps', 'wps', '99s']=None,
+                stretch_method: Literal[None, 'raw', 'smt', 'bps', 'wps', '99s']=None,
                 dtype: Literal[np.uint8, np.uint16, np.float32, np.float64]=np.uint8
                 ) -> np.ndarray:
         """Get a copy of the image data, optionally applying the stretch method
         :param stretch_method: method for finding the stretch coefficient
-        :type stretch_method: Literal['raw', 'bps', 'wps', '99s'], optional
+        :type stretch_method: Literal['raw', 'smt', 'bps', 'wps', '99s'], optional
         :return: image data
         :rtype: np.ndarray
         """
@@ -1669,7 +1688,7 @@ class Img:
         return image
 
     def show_image(self, 
-                   stretch_method: Literal['raw', 'bps', 'wps', '99s']='raw'
+                   stretch_method: Literal['raw', 'smt', 'bps', 'wps', '99s']='raw'
                 ) -> Tuple[plt.Figure, plt.Axes]:
         """Display the image using matplotlib,
         and optionally show the histogram of the image data.
@@ -1702,11 +1721,11 @@ class Img:
 
         return fig, ax
 
-    def export_image(self, stretch_method: Literal['raw', 'bps', 'wps', '99s']='bps'):
+    def export_image(self, stretch_method: Literal['raw', 'smt', 'bps', 'wps', '99s']='bps'):
         """Export the image to a file, using the stretch method, in uint8 format.
 
         :param stretch_method: Stretch method to use, defaults to 'raw'
-        :type stretch_method: Literal['raw', 'bps', 'wps'], optional
+        :type stretch_method: Literal['raw', 'smt', 'bps', 'wps', '99s'], optional
         """   
         
         if self.tag is not None:
@@ -1760,6 +1779,7 @@ class RGB:
         self.gamma = 1.0
         self.balance_vector = {
             'raw': np.zeros(3),
+            'smt': np.zeros(3),
             'bpu': np.zeros(3),
             'bpb': np.zeros(3),
             '99b': np.zeros(3),
@@ -1884,7 +1904,7 @@ class RGB:
         if self.units == 'Reflectance':
             drgb_image = self.rgb_image.copy()
         else:
-            drgb_image  = self.get_image('bpu')
+            drgb_image  = self.get_image('smt')
         # check if the ccm is set
         if self.ccm is None:
             print("No colour correction matrix set")
@@ -1902,6 +1922,7 @@ class RGB:
     def extract_balance_vector(self, 
                                method: Literal[
                                             'raw', 
+                                            'smt',
                                             'bpb', 
                                             'bpu', 
                                             'wps',     
@@ -1911,7 +1932,7 @@ class RGB:
         """Extract the stretch coefficient for each channel of the RGB image.
 
         :param method: stretch method, defaults to 'raw'
-        :type method: Literal['raw', 'bpb', 'bpu', 'wpb', 'wpu', '99b', '99u'], optional
+        :type method: Literal['raw', 'smt', 'bpb', 'bpu', 'wpb', 'wpu', '99b', '99u'], optional
         """        
 
         if method == 'raw':
@@ -1922,6 +1943,13 @@ class RGB:
             g_stretch = self.green.extract_stretch_coefficient(method)
             # blue stretch
             b_stretch = self.blue.extract_stretch_coefficient(method)
+        elif method == 'smt':
+            # smart stretch, balancing channels
+                        # set the stretch coefficient based on the minimum exposure time
+            max_val = (2.0**BIT_DEPTH-1.0) / np.min(self.exposures)
+            r_stretch = 1.0 / max_val
+            g_stretch = 1.0 / max_val
+            b_stretch = 1.0 / max_val
         elif method == 'bpb':
             # independent brightest pixel stretch, balancing channels
             # red stretch
@@ -2035,11 +2063,11 @@ class RGB:
         return stretch_img
 
     def get_image(self,
-                  colour_correction: Literal['raw', 'bpb', 'bpu', 'wps', '99b', '99u', 'ccm']='raw'
+                  colour_correction: Literal['raw', 'smt', 'bpb', 'bpu', 'wps', '99b', '99u', 'ccm']='raw'
                   ) -> np.ndarray:
         """Get a copy of the image data, optionally applying the stretch method
         :param colour_correction: method for finding the stretch coefficient
-        :type colour_correction: Literal['raw', 'bps', 'wps', '99p', 'ccm'], optional
+        :type colour_correction: Literal['raw', 'smt', 'bps', 'wps', '99p', 'ccm'], optional
         :return: image data
         :rtype: np.ndarray
         """
@@ -2055,7 +2083,7 @@ class RGB:
         return image
 
     def show_image(self, 
-                   colour_correction: Literal['raw', 'bpb', 'bpu', 'wps', '99b','99u', 'ccm']='raw'):
+                   colour_correction: Literal['raw', 'smt', 'bpb', 'bpu', 'wps', '99b','99u', 'ccm']='raw'):
         """Display the RGB image using matplotlib,
         and optionally show the histogram of the image data.
         """
@@ -2086,6 +2114,7 @@ class RGB:
 
     def export_image(self, 
                      colour_correction: Literal['raw', 'bpb', 'bpu', 'wps', '99b','99u', 'ccm']='raw',
+                     gamma: float=1.0,
                      show: bool=False) -> Path:
         """Export the image to an 8-bit RGB image file, using the stretch method
 
@@ -2115,7 +2144,9 @@ class RGB:
         else:
             if (self.balance_vector[colour_correction] == np.zeros(3)).all():
                 self.extract_balance_vector(colour_correction)
-            disp_img = np.clip(self.apply_balance_vector(colour_correction), 0.0, 1.0)        
+            disp_img = np.clip(self.apply_balance_vector(colour_correction), 0.0, 1.0)  
+            # apply gamma correction
+            disp_img = np.power(disp_img, 1.0/gamma)
             # convert to uint8
             disp_img = (disp_img * 255).astype(np.uint8)
 
