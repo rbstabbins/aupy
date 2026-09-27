@@ -8,7 +8,9 @@
 # 9/5/2025 v1
 # 269/2026 v2
 
+import os
 from pathlib import Path
+import shutil
 from typing import Dict, List, Literal, Tuple, Union, Optional
 import cv2
 import matplotlib as mpl
@@ -16,10 +18,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 import pandas as pd
+import re
 from roipoly import RoiPoly
 from scipy.stats import linregress
 from scipy.optimize import curve_fit
 from scipy.interpolate import interp1d
+import shutil
 from spectral import envi
 from PIL import Image
 from PIL import ImageDraw, ImageFont
@@ -87,6 +91,146 @@ def gauss(x: NDArray, a: float, x0: float, sigma: float) -> NDArray:
     """        
     return a*np.exp(-(x-x0)**2/(2*sigma**2))
 
+# SKP FT1 ROCC Downlink Directory Parser
+
+class ROCCIMG:
+    def __init__(self, png_file: Path, xml_file: Path = None, pr_dir: Path = None):
+        self.png_file = png_file #type: Path 
+        self.xml_file = xml_file #type: Path 
+        self.pr_dir = pr_dir #type: Path 
+        self.meta_dict = load_xml_metadata(xml_path=self.xml_file)
+        self.utc_date = self.meta_dict['UTC_date']
+        self.utc_time = self.meta_dict['UTC_time']
+        self.sol = f"{int(self.meta_dict['sol']):02d}"
+        self.task_id = f"{int(self.meta_dict['task_id']):02d}"
+        self.run_num = f"{int(self.meta_dict['task_run_num']):02d}"
+        # pad tilt as ±00.00 and pan as ±000.00
+        self.tilt = f"{float(self.meta_dict['tilt']):0=+z6.2f}"
+        self.pan = f"{float(self.meta_dict['pan']):0=+z7.2f}"
+        # # if Pan does not lead with '-', add '+'
+        # if not self.pan.startswith('-'):
+        #     self.pan = '+' + self.pan
+        # # if Tilt does not lead with '-', add '+'
+        # if not self.tilt.startswith('-'):
+        #     self.tilt = '+' + self.tilt
+        self.run_id = self.run_num + f'_T{self.tilt}' + f'_P{self.pan}'
+
+        self.out_dir = self.set_out_dirtree()
+        self.png_out_filename = self.set_out_filename()
+        self.xml_out_filename = self.png_out_filename + '.xml'
+        self.png_out_path = self.out_dir / self.png_out_filename
+        self.xml_out_path = self.out_dir / self.xml_out_filename
+
+    def set_out_dirtree(self):
+        """Use the image xml information to set the output directory.
+
+        :return: _description_
+        :rtype: _type_
+        """        
+        
+        # Create the directory tree for the output based on the metadata dictionary and data directory
+        # pr_dir.mkdir(parents=True, exist_ok=True)
+        sol_dir = self.pr_dir / ('sol'+self.meta_dict['sol']) / 'aupy'
+        # sol_dir.mkdir(parents=True, exist_ok=True)
+        
+        # parse task_id to int and then 3-digit padded 0 string
+        task_id_dir = sol_dir / (('sol'+self.meta_dict['sol']) + ('_' + self.task_id))
+
+        # parse task_run_num to int and then 3-digit padded 0 string
+        task_run_num_dir = task_id_dir / (('sol'+self.meta_dict['sol']) + ('_' + self.task_id) + ('_'+self.run_id))
+        task_run_num_dir.mkdir(parents=True, exist_ok=True)
+
+        return task_run_num_dir
+
+    def set_out_filename(self):
+        return Path(self.meta_dict['file_name']).name
+
+    def run_file_rename(self):
+        """Take the input png and xml files and write it to the out_paths
+        using the pathlib equivalant to command line mv"""
+        if self.png_file.exists():
+            shutil.copy2(self.png_file, self.png_out_path)
+        if self.xml_file and self.xml_file.exists():
+            shutil.copy2(self.xml_file, self.xml_out_path)
+
+        return self.png_out_path, self.xml_out_path
+
+class ROCCDownlinkDirTool:
+    """Parser for the SKP FT1 ROCC Downlink Directory structure.
+    Takes the ROCC organised downlink directories, and extracts PanCam
+    image data, and arranges into a structured format for processing."""
+
+    def __init__(self, downlink_sol_dir: Path, processing_dir: Path):
+
+        self.sol_dir = downlink_sol_dir
+        if not self.sol_dir.exists():
+            raise FileNotFoundError(f"Sol directory {self.sol_dir} does not exist.")
+        self.sol = downlink_sol_dir.name
+        self.pr_dir = processing_dir
+
+    def get_downlinked_dirs(self) -> List[str]:
+        """Map the directory structure for the given sol.
+
+        :return: list of directories in the downlinked sol package
+        :rtype: List[str]
+        """        
+        dl_dirs = [d.name for d in self.sol_dir.iterdir() if d.is_dir()]
+        return sorted(dl_dirs)
+    
+    @staticmethod
+    def get_all_pancam_pngs(sol_dir: Path, dl_dirs: List[str]):
+        """use pathlib and regex to find all WAC or HRC png files in the 
+        downlinked directories recursively"""
+
+        png_files = []
+        for dl_dir in dl_dirs:
+            dl_path = sol_dir / dl_dir
+            # look for files that starts with WAC or HRC and ends with .png
+            for file_path in dl_path.rglob("WAC*.png"):
+                if re.match(r".*(WAC|HRC)*\.png$", file_path.name):
+                    png_files.append(file_path)
+            for file_path in dl_path.rglob("HRC*.png"):
+                if re.match(r".*(WAC|HRC)*\.png$", file_path.name):
+                    png_files.append(file_path)
+        png_files.sort()
+        return png_files
+
+    @staticmethod
+    def get_png_xmls(png_files: List[Path]):
+        """Pair each png file with an xml file.
+        If no xml is present, file with None"""
+        png_xml_pairs = []  # List to store tuples of (png_file, xml_file or None)
+        for png_file in png_files:
+            xml_file = Path(str(png_file) + ".xml")
+            if xml_file.exists():
+                png_xml_pairs.append((png_file, xml_file))
+            else:
+                print(f"Warning: XML file not found for {png_file.stem}. Dropping this file from processing")            
+
+        return png_xml_pairs
+
+    def build_new_proc_dir(self, png_xml_pairs: List[Tuple[Path, Path]]) -> List[Path]:
+        """Take the list of pngs and xmls and arrange and rename in the 
+        processing directory"""
+
+        new_png_xml_pairs = []
+        for png_file, xml_file in png_xml_pairs:
+            pancam_img = ROCCIMG(png_file, xml_file, self.pr_dir)
+            new_png, new_xml = pancam_img.run_file_rename()
+            new_png_xml_pairs.append((new_png, new_xml))
+
+        return new_png_xml_pairs
+
+    def organise(self) -> List[Path]:
+        """Create the new organised and relablled directory tree"""
+
+        dl_dirs = self.get_downlinked_dirs()
+        pngs = self.get_all_pancam_pngs(self.sol_dir, dl_dirs)
+        png_xml_pairs = self.get_png_xmls(pngs)
+        new_png_xml_pairs = self.build_new_proc_dir(png_xml_pairs)
+
+        return new_png_xml_pairs
+    
 # Convenience XML reader
 
 def load_xml_metadata(xml_path: Path):
@@ -94,12 +238,22 @@ def load_xml_metadata(xml_path: Path):
     
     Credit to Harry Marsh for xml reader code."""
 
+
     #find and breakdown the important xml bits
     attrs = pd.read_xml(xml_path, xpath=".//attribute", parser = "etree")
     meta = attrs.loc[attrs["name"] == "ImageMetadata", "value"].iloc[0]
     parts = meta.split("|")
     # put every other item into a dictionary
     meta_dict = {parts[i]: parts[i + 1] for i in range(0, len(parts), 2)}
+
+    # get the createdtime
+    text = Path(xml_path).read_text(encoding="utf-8")
+    uuid = re.search(r'UUID="([^"]+)"', text).group(1)
+    created = re.search(r'createdtime="UTC=([^"]+)"', text).group(1)
+    # break into date and time
+    date, time = created.split("T")
+    meta_dict["UTC_date"] = date
+    meta_dict["UTC_time"] = time
     
     return meta_dict
 
